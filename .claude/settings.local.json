@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la /home/arts/Downloads/vr_ur/xrobotoolkit_ur/scripts/hardware/)",
+      "Read(//home/arts/Downloads/vr_ur/xrobotoolkit_ur/scripts/hardware/**)",
+      "Bash(find /home/arts/Downloads/vr_ur/xrobotoolkit_ur/scripts/common/ -type f -name \"*.py\" | sort)",
+      "Read(//home/arts/Downloads/vr_ur/xrobotoolkit_ur/scripts/common/**)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/home/arts/ur3e_vr/mujoco_env/hardware/ur3e_api.py'\\).read\\(\\)\\); print\\('Syntax OK'\\)\")"
+    ]
+  }
+}
