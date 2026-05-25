@@ -18,7 +18,7 @@ class XrobotVrReader:
         from xrobotoolkit_teleop.common.xr_client import XrClient
 
         self.xr = XrClient()
-        self._headset_rot = R.from_matrix(cfg.headset_to_world)
+        self._headset_rot = R.from_matrix(cfg.headset_orientation_to_world)
 
     def read(self) -> dict:
         raw_pose = self._safe(lambda: self.xr.get_pose_by_name("right_controller"))
@@ -48,4 +48,3 @@ class XrobotVrReader:
             return fn()
         except Exception:
             return default
-

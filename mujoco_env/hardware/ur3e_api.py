@@ -484,6 +484,10 @@ class UR3eController:
         """moveJ back to the configured home pose."""
         return self.move_joints(self.home_q, asynchronous=False)
 
+    def move_to_home(self) -> bool:
+        """moveJ back to the configured home pose."""
+        return self.go_home()
+
     def wait_until_joints_reached(
         self,
         target_q: Sequence[float],

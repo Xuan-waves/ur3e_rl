@@ -32,6 +32,10 @@ class MinkIkSolver:
         self.cfg = cfg
         self.mink = mink
         self.model = mujoco.MjModel.from_xml_path(cfg.xml_path)
+        self.data = mujoco.MjData(self.model)
+        self.site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, cfg.ee_frame)
+        if self.site_id < 0:
+            raise ValueError(f"MuJoCo site not found: {cfg.ee_frame}")
         self.configuration = self.mink.Configuration(self.model)
         self.ee_task = self.mink.FrameTask(
             frame_name=cfg.ee_frame,
@@ -42,6 +46,14 @@ class MinkIkSolver:
         )
         self.posture_task = self.mink.PostureTask(model=self.model, cost=cfg.ik_posture_cost)
         self.damping_task = self.mink.DampingTask(model=self.model, cost=cfg.ik_damping_cost)
+
+    def forward(self, q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        self.data.qpos[:6] = q
+        self.data.qvel[:] = 0.0
+        mujoco.mj_forward(self.model, self.data)
+        pos = self.data.site_xpos[self.site_id].copy()
+        mat = self.data.site_xmat[self.site_id].reshape(3, 3).copy()
+        return pos, R.from_matrix(mat).as_quat()
 
     def solve(
         self,

@@ -14,23 +14,25 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from real_teleop.config import TeleopConfig
-from real_teleop.nodes import IkNode, RobotNode, TwinNode, VrNode
+from real_teleop.nodes import IkNode, RobotNode, VrNode
 
 
 def _split_nodes(args) -> list[str]:
     nodes = ["vr", "ik", "robot"]
-    if not args.no_twin:
-        nodes.append("twin")
     return nodes
 
 
 def _node_command(args, node_name: str) -> list[str]:
+    if node_name == "twin":
+        node_name = "ik"
     cmd = [sys.executable, str(Path(__file__).resolve()), "--node", node_name]
     cmd += ["--robot-ip", args.robot_ip]
     if args.xml:
         cmd += ["--xml", args.xml]
     if args.dry_run and node_name == "robot":
         cmd.append("--dry-run")
+    if args.no_twin and node_name == "ik":
+        cmd.append("--no-twin")
     return cmd
 
 
@@ -129,8 +131,8 @@ def main() -> int:
     parser.add_argument("--robot-ip", default="192.168.5.1")
     parser.add_argument("--xml", default=None, help="MuJoCo XML used for IK and digital twin.")
     parser.add_argument("--dry-run", action="store_true", help="Do not connect to the UR controller.")
-    parser.add_argument("--no-twin", action="store_true", help="Do not start the MuJoCo viewer in --node all.")
-    parser.add_argument("--split-tabs", action="store_true", help="Launch vr/ik/robot/twin in separate terminal tabs.")
+    parser.add_argument("--no-twin", action="store_true", help="Do not start the MuJoCo twin viewer inside the IK node.")
+    parser.add_argument("--split-tabs", action="store_true", help="Launch vr/ik/robot in separate terminal tabs.")
     parser.add_argument(
         "--split-launcher",
         choices=["auto", "tmux", "gnome-tabs", "print"],
@@ -155,17 +157,13 @@ def main() -> int:
             node = rclpy.create_node("ur3e_vr_input")
             resources.append(VrNode(node, cfg))
             ros_nodes.append(node)
-        if args.node in ("all", "ik"):
+        if args.node in ("all", "ik", "twin"):
             node = rclpy.create_node("ur3e_mink_ik")
-            resources.append(IkNode(node, cfg))
+            resources.append(IkNode(node, cfg, enable_twin=True if args.node == "twin" else not args.no_twin))
             ros_nodes.append(node)
         if args.node in ("all", "robot"):
             node = rclpy.create_node("ur3e_servoj_robot")
             resources.append(RobotNode(node, cfg, dry_run=args.dry_run))
-            ros_nodes.append(node)
-        if args.node == "twin" or (args.node == "all" and not args.no_twin):
-            node = rclpy.create_node("ur3e_mujoco_twin")
-            resources.append(TwinNode(node, cfg))
             ros_nodes.append(node)
 
         executor = MultiThreadedExecutor(num_threads=max(2, len(ros_nodes)))
