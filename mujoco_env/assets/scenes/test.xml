@@ -1,0 +1,189 @@
+<mujoco model="scene">
+
+    <include file="../ur3e_ag95/ur3e_ag95.xml" />
+
+    <compiler angle="radian" autolimits="true" />
+	
+    <option timestep="0.002" integrator="implicitfast" solver="PGS" gravity="0 0 -9.82"
+            cone="elliptic">
+		<!--		 <flag multiccd="enable"/>-->
+    </option>
+
+	<!-- 利用mujoco软件来调整Visualization->Free Camera->点击Align更新查看，需要在env代码里进行设置，不能自动启用 -->
+    <statistic center="1.8 1.1 1.7" extent="0.8" meansize="0.08" />
+
+    <visual>
+        <headlight diffuse="0.6 0.6 0.6" ambient="0.1 0.1 0.1" specular="0 0 0" />
+        <rgba haze="0.15 0.25 0.35 1" />
+
+		<!-- 利用mujoco软件来调整Visualization->Free Camera->点击Align更新查看，需要在env代码里进行设置，不能自动启用 -->
+		<global azimuth="210" elevation="-35" offheight="1280" offwidth="1280"/>
+    </visual>
+
+    <asset>
+        <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512"
+                 height="3072" />
+        <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4"
+                 rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300" />
+        <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5"
+                  reflectance="0.2" />
+
+        <!--meshes-->
+        <mesh name ="table" file="../table/sigmund_table.stl" scale= "1 1 1"/>
+		<mesh name ="Apple" file="../fruit/Apple.STL" scale= "0.001 0.001 0.001"/>
+		<mesh name ="Banana" file="../fruit/Banana.STL" scale= "0.001 0.001 0.001"/>
+
+		<mesh name="hammer_head" file="../hammer/hammer_head.stl"/>
+		<mesh name="hammer_neck" file="../hammer/hammer_neck.stl"/>
+		<mesh name="hammer_contact0" file="../hammer/contact0.stl"/>
+		<mesh name="hammer_contact1" file="../hammer/contact1.stl"/>
+
+		<mesh name="knife_blade" file="../knife/knife_blade.stl"/>
+        <mesh name="knife_handle" file="../knife/knife_handle.stl"/>
+        <mesh name="knife_contact0" file="../knife/contact0.stl"/>
+        <mesh name="knife_contact1" file="../knife/contact1.stl"/>
+
+		<mesh name="duck" file="../duck/duck.stl" scale= "0.8 0.8 0.8"/>
+        <mesh name="duck_contact0" file="../duck/contact0.stl" scale= "0.8 0.8 0.8"/>
+        <mesh name="duck_contact1" file="../duck/contact1.stl" scale= "0.8 0.8 0.8"/>
+        <mesh name="duck_contact2" file="../duck/contact2.stl" scale= "0.8 0.8 0.8"/>
+
+		<!-- <mesh name="flashlight" file="../flashlight/flashlight.stl"/>
+		<mesh name="flashlight_contact0" file="../flashlight/contact0.stl"/>
+		<mesh name="flashlight_contact1" file="../flashlight/contact1.stl"/> -->
+
+		<texture name="apple_tex" type="2d" file="../fruit/mesh/red-apple.png"/>
+		<material name="apple_mat" texture="apple_tex"/>
+		<texture name="banana_tex" type="2d" file="../fruit/mesh/yellow-banana.png"/>
+		<material name="banana_mat" texture="banana_tex"/>
+
+    	<material name="hammer_head_mat" rgba="0.7 0.7 0.7 1" specular="0.5"/>
+		<material name="hammer_neck_mat" rgba="0.73 0.5 0.39 1" specular="0.5"/>
+
+		<material name="knife_blade_mat" rgba="0.75 0.75 0.75 1" specular="0.5"/>
+		<material name="knife_handle_mat" rgba="0.1 0.1 0.1 1"/>
+
+		<material name="duck_mat" rgba="1 1 0 1.0"/>
+
+		<!-- <material name="flashlight_mat" rgba="1 0.65 0 1.0"/> -->
+		
+    </asset>
+
+    <worldbody>
+        <!-- <light pos="0 0 1.5" dir="0 0 -1" directional="true" /> -->
+		<light pos="1.3 0.7 2.5" dir="0 0 -1" directional="true" />
+		<geom name="floor" size="0 0 0.05" type="plane" material="groundplane" />
+		<geom name="x-aixs" group="2" type="cylinder" contype="0" conaffinity="0"
+			fromto="0 0 0 1 0 0" size="0.01" rgba="1 0 0 1" />
+		<geom name="y-aixs" group="2" type="cylinder" contype="0" conaffinity="0"
+			fromto="0 0 0 0 1 0" size="0.01" rgba="0 1 0 1" />
+		<geom name="z-aixs" group="2" type="cylinder" contype="0" conaffinity="0"
+			fromto="0 0 0 0 0 1" size="0.01" rgba="0 0 1 1" />
+
+		<!-- 利用mujoco软件来调整Rendering->Camera -->
+		<camera name="cam" pos="1.2 0.8 1.6" xyaxes="0 -1 0 1 0 0.2" mode="fixed" />
+
+		<body name="mocap" mocap="true" pos="0.8 0.6 0.74">
+			<geom name="mocap" type="sphere" size="0.000001"/>
+		</body>
+
+		<body name="Apple" pos="1.4 0.9 0.735" quat="0.7071 0.7071 0 0">
+			<joint name="Apple_joint" type="free" damping="0.1"/>
+			<geom name="Apple" type="mesh" mesh="Apple" material="apple_mat" />
+		</body>
+
+		<body name="Banana" pos="1.35 0.8 0.797" euler="3.14 0 1.0">
+			<joint name="Banana_joint" type="free" damping="0.1"/>
+			<geom name="Banana" type="mesh" mesh="Banana" material="banana_mat" />
+		</body>
+
+		<body name="Box" pos="1.35 0.8 0.9" quat="1 0 0 0">
+			<joint name="Box" type="free" />
+			<geom name="Box" type="box" size="0.025 0.025 0.025" rgba="1 0 1 1" condim="6"/>
+		</body>
+
+		<!-- <body name="T_block" pos="1.3 1.0 0.9" quat="1 0 0 0">
+			<joint name="T_block" type="free" />
+			<geom name="T_block_pt1" type="box" size="0.06 0.02 0.025" rgba="0 0.62 1 1" condim="6"/>
+			<geom name="T_block_pt2" type="box" size="0.02 0.06 0.025" pos="0.08 0 0" rgba="0 0.62 1 1" condim="6"/>
+		</body> -->
+
+		<!-- <body name="Hammer" pos="1.4 0.8 0.8" quat="0 0 1 0">
+    		<joint name="Hammer_joint" type="free" damping="0.1"/>
+    		<geom name="hammer_head_visual" type="mesh" mesh="hammer_head" material="hammer_head_mat" group="1"/>
+    		<geom name="hammer_neck_visual" type="mesh" mesh="hammer_neck" material="hammer_neck_mat" group="1"/>
+    		<geom name="hammer_contact0" type="mesh" mesh="hammer_contact0" condim="4" rgba="0 0 0 0" contype="1" conaffinity="1" group="0"/>
+    		<geom name="hammer_contact1" type="mesh" mesh="hammer_contact1" condim="4" rgba="0 0 0 0" contype="1" conaffinity="1" group="0"/>
+		</body>
+
+		<body name="Knife" pos="1.55 0.8 0.8" euler="0 0 0">
+    		<joint name="Knife_joint" type="free" damping="0.1"/>
+    		<geom name="knife_blade_visual" type="mesh" mesh="knife_blade" material="knife_blade_mat" group="1"/>
+    		<geom name="knife_handle_visual" type="mesh" mesh="knife_handle" material="knife_handle_mat" group="1"/>
+    		<geom name="knife_contact0" type="mesh" mesh="knife_contact0" condim="4" rgba="0 0 0 0" contype="1" conaffinity="1" group="0"/>
+    		<geom name="knife_contact1" type="mesh" mesh="knife_contact1" condim="4" rgba="0 0 0 0" contype="1" conaffinity="1" group="0"/>
+		</body>
+
+		<body name="Duck" pos="1.4 1.0 0.9" euler="0 0 2.2">
+    		<joint name="Duck_joint" type="free" damping="0.1"/>
+    		<geom name="duck_visual" type="mesh" mesh="duck" material="duck_mat" group="1"/>
+    		<geom name="duck_contact0" type="mesh" mesh="duck_contact0" condim="4" rgba="0 0 0 0" contype="1" conaffinity="1" group="0"/>
+    		<geom name="duck_contact1" type="mesh" mesh="duck_contact1" condim="4" rgba="0 0 0 0" contype="1" conaffinity="1" group="0"/>
+    		<geom name="duck_contact2" type="mesh" mesh="duck_contact2" condim="4" rgba="0 0 0 0" contype="1" conaffinity="1" group="0"/>
+		</body> -->
+
+		<!-- <body name="Flashlight" pos="1.35 0.8 0.9" euler="0 0 0">
+    		<joint name="Flashlight_joint" type="free" damping="0.1"/>
+    		<geom name="flashlight_visual" type="mesh" mesh="flashlight" material="flashlight_mat" group="1"/>
+    		<geom name="flashlight_contact0" type="mesh" mesh="flashlight_contact0" condim="4" rgba="0 0 0 0" contype="1" conaffinity="1" group="0"/>
+    		<geom name="flashlight_contact1" type="mesh" mesh="flashlight_contact1" condim="4" rgba="0 0 0 0" contype="1" conaffinity="1" group="0"/>
+		</body> -->
+
+		<!--Zones-->
+		<body name="zone_pickup" pos="1.4 0.6 0.73" quat="1 0 0 0">
+			<geom name="zone_pickup" type="box" size="0.2 0.6 0.01" rgba="0 1 0 0.1" contype="0" conaffinity="0"/>
+		</body>
+		<body name="zone_drop" pos="0.6 0.2 0.73" quat="1 0 0 0">
+			<geom name="zone_drop" type="box" size="0.2 0.2 0.01" rgba="1 0 0 0.1" contype="0" conaffinity="0"/>
+		</body>
+
+        <!--table -->
+		<body name = "table1" euler="0 0 0" pos= "0.8 0 0.74" >
+		  <geom name = "table1" type="mesh" mesh="table" group="2" rgba="0.35 0.35 0.35 1" mass="0" contype="0" conaffinity="0"/>
+		</body>
+		<body name = "table2" euler="0 0 0" pos= "1.6 0 0.74" >
+		  <geom name = "table2" type="mesh" mesh="table" group="2" rgba="0.35 0.35 0.35 1" mass="0" contype="0" conaffinity="0"/>
+		</body>
+
+		<body name="simple_table" pos="0.8 0.6 0.69" quat="1 0 0 0">
+			<geom name="simple_table" type="box" size="0.8 0.6 0.05" rgba="0.5 0.5 0.5 0.1"/>
+		</body>
+
+		<body name="obstacle_box_1" pos="1.35 0.2 1.0" quat="1 0 0 0">
+			<geom name="obstacle_box_1" type="box" size="0.25 0.05 0.26" rgba="0.5 0.5 0.5 1.0"/>
+		</body>
+		<!-- <body name="obstacle2" pos="0.4 0.6 1.3" quat="1 0 0 0">
+			<geom name="obstacle2" type="box" size="0.4 0.6 0.04" rgba="0.5 0.5 0.5 1.0"/>
+		</body> -->
+
+		<!-- <body name="obstacle3" pos="1.15 0.2 0.9" quat="1 0 0 0">
+			<geom name="obstacle3" type="box" size="0.05 0.2 0.16" rgba="0.5 0.5 0.5 1.0"/>
+		</body> -->
+
+		<body name="obstacle_sphere_1" pos="0.6 0.6 0.85" >
+			<geom name="obstacle_sphere_1" type="sphere" size="0.1" rgba="0.5 0.5 0.5 1.0"/>
+		</body>
+
+		<body name="obstacle_sphere_2" pos="0.6 0.6 1.5" >
+			<geom name="obstacle_sphere_2" type="sphere" size="0.15" rgba="0.5 0.5 0.5 1.0"/>
+		</body>
+
+		<body name="obstacle_sphere_3" pos="0.8 1.0 1.0" >
+			<geom name="obstacle_sphere_3" type="sphere" size="0.1" rgba="0.5 0.5 0.5 1.0"/>
+		</body>
+
+
+    </worldbody>
+
+
+</mujoco>

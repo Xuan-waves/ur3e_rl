@@ -1,0 +1,23 @@
+<mujoco>
+  <compiler angle="radian" autolimits="true"/>
+  <worldbody>
+    <body name="mug" pos="0 0 0">
+      <freejoint/>
+      <geom type="mesh" mesh="mug_vis" group="2" conaffinity="0" contype="0"/>
+      <geom type="mesh" mesh="mug_col0" group="3" rgba="0.8 0.8 0.8 0"/>
+      <geom type="mesh" mesh="mug_col1" group="3" rgba="0.8 0.8 0.8 0"/>
+      <geom type="mesh" mesh="mug_col2" group="3" rgba="0.8 0.8 0.8 0"/>
+      <geom type="mesh" mesh="mug_col3" group="3" rgba="0.8 0.8 0.8 0"/>
+    </body>
+    <body name="probe" pos="0 0 0.04" mocap="true">
+      <geom type="box" size="0.005 0.01 0.01" group="0" rgba="1 0 0 1"/>
+    </body>
+  </worldbody>
+  <asset>
+    <mesh file="../mug_6/visual/model_normalized_0.obj" name="mug_vis" scale="0.12 0.12 0.12" refquat="0.7071067811865472 0.0 0.0 0.7071067811865476"/>
+    <mesh file="../mug_6/collision/model_normalized_collision_0.obj" name="mug_col0" scale="0.12 0.12 0.12" refquat="0.7071067811865472 0.0 0.0 0.7071067811865476"/>
+    <mesh file="../mug_6/collision/model_normalized_collision_1.obj" name="mug_col1" scale="0.12 0.12 0.12" refquat="0.7071067811865472 0.0 0.0 0.7071067811865476"/>
+    <mesh file="../mug_6/collision/model_normalized_collision_2.obj" name="mug_col2" scale="0.12 0.12 0.12" refquat="0.7071067811865472 0.0 0.0 0.7071067811865476"/>
+    <mesh file="../mug_6/collision/model_normalized_collision_3.obj" name="mug_col3" scale="0.12 0.12 0.12" refquat="0.7071067811865472 0.0 0.0 0.7071067811865476"/>
+  </asset>
+</mujoco>
