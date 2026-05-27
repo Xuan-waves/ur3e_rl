@@ -27,8 +27,6 @@ def _node_command(args, node_name: str) -> list[str]:
         node_name = "ik"
     cmd = [sys.executable, str(Path(__file__).resolve()), "--node", node_name]
     cmd += ["--robot-ip", args.robot_ip]
-    cmd += ["--control-mode", args.control_mode]
-    cmd += ["--impedance-profile", args.impedance_profile]
     if args.xml:
         cmd += ["--xml", args.xml]
     if args.dry_run and node_name == "robot":
@@ -132,17 +130,6 @@ def main() -> int:
     parser.add_argument("--node", choices=["all", "all-tabs", "vr", "ik", "robot", "twin"], default="all")
     parser.add_argument("--robot-ip", default="192.168.5.1")
     parser.add_argument("--xml", default=None, help="MuJoCo XML used for IK and digital twin.")
-    parser.add_argument(
-        "--control-mode",
-        choices=["impedance", "servoj"],
-        default=TeleopConfig().robot_control_mode,
-        help="Robot execution mode. impedance consumes target TCP poses; servoj consumes IK joint targets.",
-    )
-    parser.add_argument(
-        "--impedance-profile",
-        default=TeleopConfig().impedance_profile,
-        help="Profile name from real_teleop/impedance/config.py used by impedance mode.",
-    )
     parser.add_argument("--dry-run", action="store_true", help="Do not connect to the UR controller.")
     parser.add_argument("--no-twin", action="store_true", help="Do not start the MuJoCo twin viewer inside the IK node.")
     parser.add_argument("--split-tabs", action="store_true", help="Launch vr/ik/robot in separate terminal tabs.")
@@ -160,12 +147,7 @@ def main() -> int:
     import rclpy
     from rclpy.executors import MultiThreadedExecutor
 
-    cfg = TeleopConfig(
-        robot_ip=args.robot_ip,
-        xml_path=args.xml or TeleopConfig().xml_path,
-        robot_control_mode=args.control_mode,
-        impedance_profile=args.impedance_profile,
-    )
+    cfg = TeleopConfig(robot_ip=args.robot_ip, xml_path=args.xml or TeleopConfig().xml_path)
     rclpy.init()
 
     ros_nodes = []
@@ -180,7 +162,7 @@ def main() -> int:
             resources.append(IkNode(node, cfg, enable_twin=True if args.node == "twin" else not args.no_twin))
             ros_nodes.append(node)
         if args.node in ("all", "robot"):
-            node = rclpy.create_node("ur3e_robot")
+            node = rclpy.create_node("ur3e_servoj_robot")
             resources.append(RobotNode(node, cfg, dry_run=args.dry_run))
             ros_nodes.append(node)
 

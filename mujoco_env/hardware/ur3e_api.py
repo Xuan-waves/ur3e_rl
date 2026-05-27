@@ -462,6 +462,21 @@ class UR3eController:
         self._require()
         return np.asarray(self.rtde_r.getActualQ(), dtype=float)
 
+    def get_joint_speeds(self) -> np.ndarray:
+        """Return current joint velocities as a (6,) array (rad/s)."""
+        self._require()
+        return np.asarray(self.rtde_r.getActualQd(), dtype=float)
+
+    def get_tcp_pose(self) -> np.ndarray:
+        """Return actual TCP pose as [x, y, z, rx, ry, rz]."""
+        self._require()
+        return np.asarray(self.rtde_r.getActualTCPPose(), dtype=float)
+
+    def get_tcp_speed(self) -> np.ndarray:
+        """Return actual TCP speed as [vx, vy, vz, wx, wy, wz]."""
+        self._require()
+        return np.asarray(self.rtde_r.getActualTCPSpeed(), dtype=float)
+
     # -- moveJ (point-to-point trajectory) ---------------------------
 
     def move_joints(self, q: Sequence[float], asynchronous: bool = False) -> bool:
@@ -525,6 +540,82 @@ class UR3eController:
         """Stop the servoJ stream."""
         self._require()
         self.rtde_c.servoStop()
+
+    # -- forceMode / impedance --------------------------------------
+
+    def set_payload(self, mass_kg: float, cog_m: Sequence[float]) -> None:
+        """Set UR payload for forceMode gravity compensation."""
+        self._require()
+        cog = np.asarray(list(cog_m), dtype=float)
+        if cog.shape != (3,):
+            raise ValueError(f"payload CoG must contain 3 values, got shape {cog.shape}.")
+        method = getattr(self.rtde_c, "setPayload", None)
+        if not callable(method):
+            raise RuntimeError("RTDEControlInterface does not support setPayload().")
+        result = method(float(mass_kg), cog.tolist())
+        if result is False:
+            raise RuntimeError("RTDEControlInterface.setPayload() returned False.")
+
+    def set_force_mode_damping(self, damping: float) -> None:
+        """Set UR forceMode damping when supported by the installed ur_rtde."""
+        self._require()
+        method = getattr(self.rtde_c, "forceModeSetDamping", None)
+        if callable(method):
+            method(float(damping))
+
+    def set_force_mode_gain_scaling(self, gain_scaling: float) -> None:
+        """Set UR forceMode gain scaling when supported by the installed ur_rtde."""
+        self._require()
+        method = getattr(self.rtde_c, "forceModeSetGainScaling", None)
+        if callable(method):
+            method(float(gain_scaling))
+
+    def zero_ft_sensor(self) -> None:
+        """Zero the UR e-series force/torque sensor when supported."""
+        self._require()
+        method = getattr(self.rtde_c, "zeroFtSensor", None)
+        if not callable(method):
+            raise RuntimeError("RTDEControlInterface does not support zeroFtSensor().")
+        method()
+
+    def force_mode(
+        self,
+        task_frame: Sequence[float],
+        selection_vector: Sequence[int],
+        wrench: Sequence[float],
+        force_type: int,
+        limits: Sequence[float],
+    ) -> None:
+        """Send one UR forceMode command."""
+        self._require()
+        frame = np.asarray(list(task_frame), dtype=float)
+        selection = [int(v) for v in selection_vector]
+        wrench_arr = np.asarray(list(wrench), dtype=float)
+        limit_arr = np.asarray(list(limits), dtype=float)
+        if frame.shape != (6,):
+            raise ValueError(f"task_frame must contain 6 values, got shape {frame.shape}.")
+        if len(selection) != 6:
+            raise ValueError(f"selection_vector must contain 6 values, got {len(selection)}.")
+        if wrench_arr.shape != (6,):
+            raise ValueError(f"wrench must contain 6 values, got shape {wrench_arr.shape}.")
+        if limit_arr.shape != (6,):
+            raise ValueError(f"limits must contain 6 values, got shape {limit_arr.shape}.")
+        self.rtde_c.forceMode(
+            frame.tolist(),
+            selection,
+            wrench_arr.tolist(),
+            int(force_type),
+            limit_arr.tolist(),
+        )
+
+    def force_mode_stop(self) -> None:
+        """Stop UR forceMode, compatible with common ur_rtde method names."""
+        self._require()
+        for method_name in ("forceModeStop", "endForceMode"):
+            method = getattr(self.rtde_c, method_name, None)
+            if callable(method):
+                method()
+                return
 
     # -- gripper -----------------------------------------------------
 

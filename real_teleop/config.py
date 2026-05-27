@@ -19,17 +19,26 @@ class TeleopConfig:
     actual_read_hz: float = 50.0
     gripper_hz: float = 25.0
     twin_hz: float = 60.0
+    robot_control_mode: str = "impedance"
 
     enable_threshold: float = 0.85
     scale: float = 1.2
-    dead_zone_pos: float = 0.0005
-    dead_zone_rot: float = 0.002
-    ctrl_filter_alpha: float = 0.65
-    target_filter_alpha: float = 0.55
+    dead_zone_pos: float = 0.005
+    dead_zone_rot: float = 0.01
+    ctrl_filter_alpha: float = 0.45
+    target_filter_alpha: float = 0.35
     joint_target_alpha: float = 0.35
-    fixed_ee_orientation: bool = True
+    impedance_target_alpha: float = 0.40
+    impedance_profile: str = "passive"
+    impedance_state_source: str = "rtde"
+    impedance_max_fk_rtde_delta_m: float = 0.05
+    fixed_ee_orientation: bool = False
     stale_command_s: float = 0.50
     stale_target_s: float = 0.30
+    impedance_soft_hold_on_lost: bool = True
+    target_pos_hold_epsilon: float = 0.0015
+    target_rot_hold_epsilon: float = 0.008
+    ik_joint_deadband: float = 0.0005
 
     gripper_close_mj: float = 0.6
     home_move_duration_s: float = 1.5
@@ -41,6 +50,12 @@ class TeleopConfig:
     )
     workspace_max: np.ndarray = field(
         default_factory=lambda: np.array([1.35, 1.15, 1.35], dtype=float)
+    )
+    impedance_workspace_min: np.ndarray = field(
+        default_factory=lambda: np.array([-0.15, -0.65, 0.04], dtype=float)
+    )
+    impedance_workspace_max: np.ndarray = field(
+        default_factory=lambda: np.array([0.45, 0.10, 0.45], dtype=float)
     )
     joint_limits: np.ndarray = field(
         default_factory=lambda: np.array(
@@ -71,6 +86,7 @@ class TeleopConfig:
 
     ik_position_cost: float = 1.0
     ik_orientation_cost: float = 0.5
+    
     ik_posture_cost: float = 0.02
     ik_damping_cost: float = 0.01
     ik_lm_damping: float = 1.0
@@ -80,8 +96,8 @@ class TeleopConfig:
     headset_to_world: np.ndarray = field(
         default_factory=lambda: np.array(
             [
-                [1.0, 0.0, 0.0],
-                [0.0, 0.0, -1.0],
+                [-1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
                 [0.0, 1.0, 0.0],
             ],
             dtype=float,
@@ -90,8 +106,8 @@ class TeleopConfig:
     headset_orientation_to_world: np.ndarray = field(
         default_factory=lambda: np.array(
             [
-                [1.0, 0.0, 0.0],
-                [0.0, 0.0, -1.0],
+                [-1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
                 [0.0, 1.0, 0.0],
             ],
             dtype=float,

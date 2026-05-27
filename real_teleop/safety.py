@@ -12,6 +12,9 @@ class SafetyLimiter:
     def clamp_workspace(self, pos: np.ndarray) -> np.ndarray:
         return np.clip(pos, self.cfg.workspace_min, self.cfg.workspace_max)
 
+    def clamp_impedance_workspace(self, pos: np.ndarray) -> np.ndarray:
+        return np.clip(pos, self.cfg.impedance_workspace_min, self.cfg.impedance_workspace_max)
+
     def check_workspace(self, pos: np.ndarray) -> bool:
         return bool(np.all(pos >= self.cfg.workspace_min) and np.all(pos <= self.cfg.workspace_max))
 
@@ -30,4 +33,3 @@ class SafetyLimiter:
         max_step = min(self.cfg.max_joint_step, self.cfg.max_joint_speed * dt)
         delta = np.clip(target_q - current_q, -max_step, max_step)
         return self.clamp_joints(current_q + delta)
-

@@ -24,6 +24,35 @@ class RobotKinematics:
         mat = self.data.site_xmat[self.site_id].reshape(3, 3).copy()
         return pos, R.from_matrix(mat).as_quat()
 
+    def linear_jacobian(self, q: np.ndarray) -> np.ndarray:
+        self.data.qpos[:6] = q
+        self.data.qvel[:] = 0.0
+        mujoco.mj_forward(self.model, self.data)
+        jacp = np.zeros((3, self.model.nv), dtype=float)
+        jacr = np.zeros((3, self.model.nv), dtype=float)
+        mujoco.mj_jacSite(self.model, self.data, jacp, jacr, self.site_id)
+        return jacp[:, :6].copy()
+
+    def jacobians(self, q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        self.data.qpos[:6] = q
+        self.data.qvel[:] = 0.0
+        mujoco.mj_forward(self.model, self.data)
+        jacp = np.zeros((3, self.model.nv), dtype=float)
+        jacr = np.zeros((3, self.model.nv), dtype=float)
+        mujoco.mj_jacSite(self.model, self.data, jacp, jacr, self.site_id)
+        return jacp[:, :6].copy(), jacr[:, :6].copy()
+
+    def forward_with_linear_velocity(self, q: np.ndarray, qd: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        pos, _ = self.forward(q)
+        jac = self.linear_jacobian(q)
+        return pos, jac @ np.asarray(qd, dtype=float)
+
+    def forward_with_velocity(self, q: np.ndarray, qd: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        pos, quat = self.forward(q)
+        jacp, jacr = self.jacobians(q)
+        qd_arr = np.asarray(qd, dtype=float)
+        return pos, quat, jacp @ qd_arr, jacr @ qd_arr
+
 
 class MinkIkSolver:
     def __init__(self, cfg: TeleopConfig):

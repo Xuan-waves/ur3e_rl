@@ -8,6 +8,8 @@ ROBOT_IP="192.168.5.1"
 XML_PATH=""
 DRY_RUN=0
 NO_TWIN=0
+CONTROL_MODE="impedance"
+IMPEDANCE_PROFILE="passive"
 CONDA_ENV_NAME="${UR3E_VR_CONDA_ENV:-vr}"
 
 usage() {
@@ -19,6 +21,8 @@ Options:
   --robot-ip IP          UR controller IP. Default: 192.168.5.1
   --xml PATH             MuJoCo XML path for IK and digital twin.
   --no-twin              Do not start MuJoCo viewer inside the IK tab.
+  --control-mode MODE    Robot control mode: impedance or servoj. Default: impedance.
+  --impedance-profile P  Impedance profile from real_teleop/impedance/config.py. Default: passive.
   --conda-env NAME       Conda environment to activate. Default: $UR3E_VR_CONDA_ENV or vr.
   --no-conda             Use current shell Python instead of activating conda.
   -h, --help             Show this help.
@@ -42,6 +46,18 @@ while [ "$#" -gt 0 ]; do
         --no-twin)
             NO_TWIN=1
             shift
+            ;;
+        --control-mode)
+            CONTROL_MODE="${2:?--control-mode requires a value}"
+            if [ "$CONTROL_MODE" != "impedance" ] && [ "$CONTROL_MODE" != "servoj" ]; then
+                echo "[launcher] --control-mode must be impedance or servoj" >&2
+                exit 2
+            fi
+            shift 2
+            ;;
+        --impedance-profile)
+            IMPEDANCE_PROFILE="${2:?--impedance-profile requires a value}"
+            shift 2
             ;;
         --conda-env)
             CONDA_ENV_NAME="${2:?--conda-env requires a value}"
@@ -102,6 +118,8 @@ ROBOT_IP=$(quote "$ROBOT_IP")
 XML_PATH=$(quote "$XML_PATH")
 DRY_RUN=$DRY_RUN
 NO_TWIN=$NO_TWIN
+CONTROL_MODE=$(quote "$CONTROL_MODE")
+IMPEDANCE_PROFILE=$(quote "$IMPEDANCE_PROFILE")
 CONDA_ENV_NAME=$(quote "$CONDA_ENV_NAME")
 
 mkdir -p "\${PID_DIR}"
@@ -158,7 +176,7 @@ activate_conda_env() {
 }
 
 build_args() {
-    ARGS=(--node "\${NODE_NAME}" --robot-ip "\${ROBOT_IP}")
+    ARGS=(--node "\${NODE_NAME}" --robot-ip "\${ROBOT_IP}" --control-mode "\${CONTROL_MODE}" --impedance-profile "\${IMPEDANCE_PROFILE}")
     if [ -n "\${XML_PATH}" ]; then
         ARGS+=(--xml "\${XML_PATH}")
     fi
@@ -189,6 +207,8 @@ echo "working dir : \${PROJECT_ROOT}"
 echo "script      : \${MAIN_SCRIPT}"
 echo "node        : \${NODE_NAME}"
 echo "robot ip    : \${ROBOT_IP}"
+echo "control mode: \${CONTROL_MODE}"
+echo "imp profile : \${IMPEDANCE_PROFILE}"
 echo "conda env   : \${CONDA_ENV_NAME:-<current>}"
 echo "ros logs    : \${ROS_LOG_DIR}"
 echo
@@ -234,13 +254,13 @@ ROBOT_RUNNER="$PID_DIR/robot_runner.sh"
 
 create_runner "$VR_RUNNER" "UR3e VR Input" "vr" "vr"
 create_runner "$IK_RUNNER" "UR3e IK + MuJoCo Twin" "ik" "ik"
-create_runner "$ROBOT_RUNNER" "UR3e Robot servoJ" "robot" "robot"
+create_runner "$ROBOT_RUNNER" "UR3e Robot" "robot" "robot"
 
 echo "[launcher] Opening one GNOME Terminal window with three tabs..."
 echo "[launcher] 1) VR Input          env=${CONDA_ENV_NAME:-<current>}"
 echo "[launcher] 2) IK + MuJoCo Twin  env=${CONDA_ENV_NAME:-<current>}"
-echo "[launcher] 3) Robot servoJ      env=${CONDA_ENV_NAME:-<current>}"
-echo "[launcher] dry_run=$DRY_RUN no_twin=$NO_TWIN robot_ip=$ROBOT_IP"
+echo "[launcher] 3) Robot             env=${CONDA_ENV_NAME:-<current>}"
+echo "[launcher] dry_run=$DRY_RUN no_twin=$NO_TWIN robot_ip=$ROBOT_IP control_mode=$CONTROL_MODE impedance_profile=$IMPEDANCE_PROFILE"
 echo "[launcher] Shared PID directory: $PID_DIR"
 
 gnome-terminal \
