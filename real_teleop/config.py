@@ -25,20 +25,27 @@ class TeleopConfig:
     scale: float = 1.2
     dead_zone_pos: float = 0.005
     dead_zone_rot: float = 0.01
-    ctrl_filter_alpha: float = 0.45
-    target_filter_alpha: float = 0.35
+    ctrl_filter_alpha: float = 0.70
+    target_filter_alpha: float = 0.65
     joint_target_alpha: float = 0.35
-    impedance_target_alpha: float = 0.40
-    impedance_profile: str = "passive"
+    impedance_target_alpha: float = 0.75
+    impedance_profile: str = "teleop"
     impedance_state_source: str = "rtde"
     impedance_max_fk_rtde_delta_m: float = 0.05
+    impedance_ramp_duration_s: float = 0.08
+    impedance_target_pos_error_limit: float = 0.5
+    impedance_target_rot_error_limit: float = 0.0
+    vr_track_orientation: bool = False
     fixed_ee_orientation: bool = False
     stale_command_s: float = 0.50
     stale_target_s: float = 0.30
     impedance_soft_hold_on_lost: bool = True
-    target_pos_hold_epsilon: float = 0.0015
-    target_rot_hold_epsilon: float = 0.008
+    target_pos_hold_epsilon: float = 0.0008
+    target_rot_hold_epsilon: float = 0.004
     ik_joint_deadband: float = 0.0005
+    vr_controller_pivot_offset_m: np.ndarray = field(
+        default_factory=lambda: np.array([0.0, 0.0, 0.0], dtype=float)
+    )
 
     gripper_close_mj: float = 0.6
     home_move_duration_s: float = 1.5

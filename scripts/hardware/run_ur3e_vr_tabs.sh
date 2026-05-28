@@ -9,7 +9,7 @@ XML_PATH=""
 DRY_RUN=0
 NO_TWIN=0
 CONTROL_MODE="impedance"
-IMPEDANCE_PROFILE="passive"
+IMPEDANCE_PROFILE="teleop"
 CONDA_ENV_NAME="${UR3E_VR_CONDA_ENV:-vr}"
 
 usage() {
@@ -22,7 +22,7 @@ Options:
   --xml PATH             MuJoCo XML path for IK and digital twin.
   --no-twin              Do not start MuJoCo viewer inside the IK tab.
   --control-mode MODE    Robot control mode: impedance or servoj. Default: impedance.
-  --impedance-profile P  Impedance profile from real_teleop/impedance/config.py. Default: passive.
+  --impedance-profile P  Impedance profile from real_teleop/impedance/config.py. Default: teleop.
   --conda-env NAME       Conda environment to activate. Default: $UR3E_VR_CONDA_ENV or vr.
   --no-conda             Use current shell Python instead of activating conda.
   -h, --help             Show this help.

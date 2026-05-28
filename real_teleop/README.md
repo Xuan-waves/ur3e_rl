@@ -191,6 +191,13 @@ pose. The robot tab subscribes to that pose and drives the real UR through
 limits are RTDE-frame values; tune `impedance_workspace_min/max` in
 `real_teleop/config.py` separately from the MuJoCo/IK workspace.
 
+The launcher defaults to the `teleop` impedance profile.  Use `passive` for
+hand-push tests and `teleop` for faster VR target tracking:
+
+```bash
+scripts/hardware/run_ur3e_vr_tabs.sh --control-mode impedance --impedance-profile teleop
+```
+
 The old servoJ path is still available with:
 
 ```bash

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import threading
 import traceback
+from dataclasses import replace
 from typing import Optional
 
 import numpy as np
@@ -68,6 +69,7 @@ class IkNode:
         from .kinematics import MinkIkSolver, RobotKinematics
 
         self.use_impedance_target = cfg.robot_control_mode == "impedance"
+        self.track_vr_orientation = bool(cfg.vr_track_orientation)
         self.pose_kin = RobotKinematics(cfg)
         self.ik = None if self.use_impedance_target else MinkIkSolver(cfg)
         self.home_tcp_pos, self.home_tcp_quat = self.pose_kin.forward(cfg.hardware_home_q)
@@ -253,7 +255,7 @@ class IkNode:
         tcp_pos: np.ndarray,
         tcp_quat: np.ndarray,
     ) -> None:
-        self.anchor_ctrl_pos = ctrl_pos.copy()
+        self.anchor_ctrl_pos = self._translation_control_pos(ctrl_pos, ctrl_quat)
         self.anchor_ctrl_quat = _norm_quat(ctrl_quat)
         self.anchor_tcp_pos = tcp_pos.copy()
         self.anchor_tcp_quat = _norm_quat(tcp_quat)
@@ -264,7 +266,7 @@ class IkNode:
         self.last_q_target = None
 
     def _target_from_controller(self, ctrl_pos: np.ndarray, ctrl_quat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        ctrl_pos_f, ctrl_quat_f = self.ctrl_filter(ctrl_pos, ctrl_quat)
+        ctrl_pos_f, ctrl_quat_f = self.ctrl_filter(self._translation_control_pos(ctrl_pos, ctrl_quat), ctrl_quat)
         dpos = (ctrl_pos_f - self.anchor_ctrl_pos) * self.cfg.scale
         drot = (R.from_quat(ctrl_quat_f) * R.from_quat(self.anchor_ctrl_quat).inv()).as_rotvec()
         if np.linalg.norm(dpos) < self.cfg.dead_zone_pos:
@@ -272,11 +274,22 @@ class IkNode:
         if np.linalg.norm(drot) < self.cfg.dead_zone_rot:
             drot[:] = 0.0
         pos = self.anchor_tcp_pos + dpos
-        if self.cfg.fixed_ee_orientation:
+        if self.use_impedance_target and not self.track_vr_orientation:
+            quat = self.home_tcp_quat.copy()
+        elif self.cfg.fixed_ee_orientation:
             quat = self.anchor_tcp_quat.copy() if self.use_impedance_target else self.home_tcp_quat.copy()
         else:
             quat = (R.from_rotvec(drot) * R.from_quat(self.anchor_tcp_quat)).as_quat()
         return self.target_filter(pos, quat)
+
+    def _translation_control_pos(self, ctrl_pos: np.ndarray, ctrl_quat: np.ndarray) -> np.ndarray:
+        pos = np.asarray(ctrl_pos, dtype=float)
+        if not (self.use_impedance_target and self.track_vr_orientation):
+            return pos.copy()
+        offset = np.asarray(self.cfg.vr_controller_pivot_offset_m, dtype=float)
+        if offset.shape != (3,) or float(np.linalg.norm(offset)) < 1e-9:
+            return pos.copy()
+        return pos + R.from_quat(_norm_quat(ctrl_quat)).apply(offset)
 
     def _stabilize_target_pose(self, target_pos: np.ndarray, target_quat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         target_quat = _norm_quat(target_quat)
@@ -431,6 +444,8 @@ class RobotNode:
         self.robot = None
         self.impedance_motion = None
         self.impedance_configured = False
+        self.impedance_track_vr_orientation = True
+        self.impedance_home_rotvec: Optional[np.ndarray] = None
         self.current_q = self._home_q()
         self.target_q: Optional[np.ndarray] = None
         self.filtered_target_q: Optional[np.ndarray] = None
@@ -502,10 +517,17 @@ class RobotNode:
         profile = DEFAULT_IMPEDANCE_TEST_CONFIG.profiles.get(self.cfg.impedance_profile)
         if profile is None:
             raise ValueError(f"Unknown impedance profile: {self.cfg.impedance_profile}")
+        self.impedance_track_vr_orientation = bool(self.cfg.vr_track_orientation)
+        motion_profile = profile
+        if not self.impedance_track_vr_orientation:
+            # In teleop, profile.enable_orientation=False means "ignore VR
+            # orientation", not "leave wrist orientation unconstrained".
+            motion_profile = replace(profile, enable_orientation=True)
+            self.impedance_home_rotvec = self._read_actual_tcp_rotvec()
         runtime = ImpedanceRuntimeConfig(
             robot_ip=self.cfg.robot_ip,
             control_hz=self.cfg.control_hz,
-            ramp_duration_s=DEFAULT_IMPEDANCE_TEST_CONFIG.ramp_duration_s,
+            ramp_duration_s=self.cfg.impedance_ramp_duration_s,
             state_source=self.cfg.impedance_state_source,
             max_fk_rtde_delta_m=self.cfg.impedance_max_fk_rtde_delta_m,
             move_home_first=False,
@@ -515,12 +537,27 @@ class RobotNode:
         )
         self.impedance_motion = RtdeImpedanceMotion(
             self.robot,
-            profile,
+            motion_profile,
             runtime=runtime,
             mode=self.cfg.impedance_profile,
             kinematics=self.kin if runtime.state_source == "jacobian" else None,
         )
         self.impedance_motion.assert_state_source_aligned()
+        self.node.get_logger().info(
+            "impedance_profile "
+            f"name={self.cfg.impedance_profile} "
+            f"kp={profile.kp} kd={profile.kd} max_force={profile.max_force} "
+            f"rot_kp={profile.rot_kp} rot_kd={profile.rot_kd} max_torque={profile.max_torque} "
+            f"limits={profile.force_mode_limits} damping={profile.force_mode_damping} "
+            f"gain={profile.force_mode_gain_scaling} "
+            f"track_vr_orientation={self.impedance_track_vr_orientation}"
+        )
+
+    def _read_actual_tcp_rotvec(self) -> np.ndarray:
+        if self.robot is not None:
+            return np.asarray(self.robot.get_tcp_pose()[3:], dtype=float)
+        _, quat = self.kin.forward(self._home_q())
+        return R.from_quat(quat).as_rotvec()
 
     def _home_q(self) -> np.ndarray:
         return np.asarray(self.cfg.hardware_home_q, dtype=float).copy()
@@ -627,6 +664,8 @@ class RobotNode:
             move_to_home = getattr(self.robot, "move_to_home", self.robot.go_home)
             move_to_home()
             self._set_current_q(self.robot.get_joint_positions())
+            if self.control_mode == "impedance":
+                self.impedance_home_rotvec = self._read_actual_tcp_rotvec()
         except Exception as exc:
             self.node.get_logger().error(f"Home move failed: {exc}")
         finally:
@@ -716,7 +755,8 @@ class RobotNode:
                 self._force_stop()
             return
 
-        target_rotvec = R.from_quat(_norm_quat(self.target_tcp_quat)).as_rotvec()
+        target_pos = self.target_tcp_pos
+        target_rotvec = self._target_rotvec_for_impedance(self.target_tcp_quat)
         self.soft_hold_active = False
         if self.dry_run:
             self.servo_active = True
@@ -731,18 +771,42 @@ class RobotNode:
             if not self.impedance_configured:
                 self.impedance_motion.configure_force_mode()
                 self.impedance_configured = True
+            state = self.impedance_motion.read_state()
+            target_pos, target_rotvec = self._limit_impedance_target(state, target_pos, target_rotvec)
             self.impedance_motion.set_target_pose(
-                self.target_tcp_pos,
+                target_pos,
                 target_rotvec,
                 reset_ramp=not self.servo_active,
             )
-            command = self.impedance_motion.step(execute=True)
+            command = self.impedance_motion.step(execute=True, state=state)
             self.last_target_delta = float(np.linalg.norm(command.position_error))
             self.last_q_step = float(np.linalg.norm(command.wrench[:3]))
             self.servo_active = True
         except Exception as exc:
             self.node.get_logger().error(f"impedance forceMode failed: {exc}")
             self._force_stop()
+
+    def _limit_impedance_target(
+        self,
+        state,
+        target_pos: np.ndarray,
+        target_rotvec: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        pos_delta = np.asarray(target_pos, dtype=float) - state.position
+        pos_norm = float(np.linalg.norm(pos_delta))
+        pos_limit = float(max(self.cfg.impedance_target_pos_error_limit, 1e-6))
+        if pos_norm > pos_limit:
+            target_pos = state.position + pos_delta / pos_norm * pos_limit
+
+        target_rot = R.from_rotvec(target_rotvec)
+        current_rot = R.from_rotvec(state.rotation_vector)
+        rot_delta = (target_rot * current_rot.inv()).as_rotvec()
+        rot_norm = float(np.linalg.norm(rot_delta))
+        rot_limit = float(self.cfg.impedance_target_rot_error_limit)
+        if rot_limit > 0.0 and rot_norm > rot_limit:
+            limited_rot = R.from_rotvec(rot_delta / rot_norm * rot_limit) * current_rot
+            target_rotvec = limited_rot.as_rotvec()
+        return np.asarray(target_pos, dtype=float), np.asarray(target_rotvec, dtype=float)
 
     def _apply_soft_hold(self, reason: str) -> None:
         self.target_tracking = False
@@ -766,7 +830,7 @@ class RobotNode:
                 self.target_tcp_pos = state.position.copy()
                 self.target_tcp_quat = R.from_rotvec(state.rotation_vector).as_quat()
             self.soft_hold_active = True
-            target_rotvec = R.from_quat(_norm_quat(self.target_tcp_quat)).as_rotvec()
+            target_rotvec = self._target_rotvec_for_impedance(self.target_tcp_quat)
             self.impedance_motion.set_target_pose(
                 self.target_tcp_pos,
                 target_rotvec,
@@ -779,6 +843,13 @@ class RobotNode:
         except Exception as exc:
             self.node.get_logger().warn(f"impedance soft-hold failed: {exc}")
             self._force_stop()
+
+    def _target_rotvec_for_impedance(self, target_quat: np.ndarray) -> np.ndarray:
+        if self.impedance_track_vr_orientation:
+            return R.from_quat(_norm_quat(target_quat)).as_rotvec()
+        if self.impedance_home_rotvec is None:
+            self.impedance_home_rotvec = self._read_actual_tcp_rotvec()
+        return self.impedance_home_rotvec.copy()
 
     def _force_stop(self) -> None:
         if self.control_mode != "impedance" or not self.servo_active:

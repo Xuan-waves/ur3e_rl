@@ -94,6 +94,7 @@ class CartesianImpedanceCore:
         else:
             force = kp * position_error - kd * speed[:3] - virtual_mass * accel[:3]
         force += _vec(self.profile.force_bias, 3, "profile.force_bias")
+        force = _deadband(force, _vec(self.profile.force_deadband, 3, "profile.force_deadband"))
         force = np.clip(force, -_vec(self.profile.max_force, 3, "profile.max_force"), _vec(self.profile.max_force, 3, "profile.max_force"))
 
         rotation_error = np.zeros(3, dtype=float)
@@ -114,6 +115,7 @@ class CartesianImpedanceCore:
             else:
                 torque = rot_kp * rotation_error - rot_kd * speed[3:] - rot_mass * accel[3:]
             torque += _vec(self.profile.torque_bias, 3, "profile.torque_bias")
+            torque = _deadband(torque, _vec(self.profile.torque_deadband, 3, "profile.torque_deadband"))
             max_torque = _vec(self.profile.max_torque, 3, "profile.max_torque")
             torque = np.clip(torque, -max_torque, max_torque)
 
@@ -146,6 +148,13 @@ class CartesianImpedanceCore:
         self._last_time = now
         self._last_speed = speed.copy()
         return self._acceleration.copy()
+
+
+def _deadband(values: np.ndarray, band: np.ndarray) -> np.ndarray:
+    band = np.maximum(np.asarray(band, dtype=float), 0.0)
+    result = np.asarray(values, dtype=float).copy()
+    result[np.abs(result) < band] = 0.0
+    return result
 
 
 class RtdeImpedanceMotion:
@@ -251,8 +260,8 @@ class RtdeImpedanceMotion:
     def compute(self, state: CartesianState | None = None) -> ImpedanceCommand:
         return self.core.compute(state or self.read_state())
 
-    def step(self, *, execute: bool = True) -> ImpedanceCommand:
-        command = self.compute()
+    def step(self, *, execute: bool = True, state: CartesianState | None = None) -> ImpedanceCommand:
+        command = self.compute(state)
         if execute:
             self.robot.force_mode(
                 self.TASK_FRAME,
