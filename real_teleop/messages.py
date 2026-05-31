@@ -60,19 +60,53 @@ def make_vr_command(payload: dict[str, Any]) -> list[float]:
         float(np.clip(payload.get("gripper", 0.0), 0.0, 1.0)),
         1.0 if bool(payload.get("home", False)) else 0.0,
         *pose_vec.tolist(),
+        1.0 if bool(payload.get("record_start", False)) else 0.0,
+        1.0 if bool(payload.get("record_stop", False)) else 0.0,
+        1.0 if bool(payload.get("rl_toggle", False)) else 0.0,
+        1.0 if bool(payload.get("cancel_record", False)) else 0.0,
+        float(np.clip(payload.get("left_trigger", 0.0), 0.0, 1.0)),
+        1.0 if bool(payload.get("stop_collection", False)) else 0.0,
+        float(np.clip(payload.get("left_grip", 0.0), 0.0, 1.0)),
     ]
 
 
 def parse_vr_command(data: Any) -> dict[str, Any]:
-    arr = as_vec(data, 12)
+    arr = np.asarray(data, dtype=float)
+    if arr.ndim != 1 or arr.size < 12:
+        raise ValueError(f"Expected VR command length at least 12, got {arr.shape}")
     pose = arr[5:12].copy() if arr[1] > 0.5 else None
-    return {
+    payload = {
         "stamp": float(arr[0]),
         "pose": pose,
         "enable": bool(arr[2] > 0.5),
         "gripper": float(np.clip(arr[3], 0.0, 1.0)),
         "home": bool(arr[4] > 0.5),
     }
+    if arr.size >= 17:
+        payload.update(
+            {
+                "record_start": bool(arr[12] > 0.5),
+                "record_stop": bool(arr[13] > 0.5),
+                "rl_toggle": bool(arr[14] > 0.5),
+                "cancel_record": bool(arr[15] > 0.5),
+                "left_trigger": float(np.clip(arr[16], 0.0, 1.0)),
+                "stop_collection": bool(arr[17] > 0.5) if arr.size >= 18 else False,
+                "left_grip": float(np.clip(arr[18], 0.0, 1.0)) if arr.size >= 19 else 0.0,
+            }
+        )
+    else:
+        payload.update(
+            {
+                "record_start": False,
+                "record_stop": False,
+                "rl_toggle": False,
+                "cancel_record": False,
+                "left_trigger": 0.0,
+                "stop_collection": False,
+                "left_grip": 0.0,
+            }
+        )
+    return payload
 
 
 def make_robot_state(

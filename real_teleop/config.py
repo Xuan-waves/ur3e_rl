@@ -15,6 +15,7 @@ class TeleopConfig:
     ee_frame: str = "gripper_tcp_site"
     control_hz: float = 200.0
     vr_hz: float = 100.0
+    collection_input_hz: float = 30.0
     robot_state_hz: float = 100.0
     actual_read_hz: float = 50.0
     gripper_hz: float = 25.0
@@ -22,6 +23,7 @@ class TeleopConfig:
     robot_control_mode: str = "impedance"
 
     enable_threshold: float = 0.85
+    gripper_command_max: float = 0.93
     scale: float = 1.2
     dead_zone_pos: float = 0.005
     dead_zone_rot: float = 0.01
@@ -59,7 +61,7 @@ class TeleopConfig:
         default_factory=lambda: np.array([1.35, 1.15, 1.35], dtype=float)
     )
     impedance_workspace_min: np.ndarray = field(
-        default_factory=lambda: np.array([-0.15, -0.65, 0.04], dtype=float)
+        default_factory=lambda: np.array([-0.15, -0.65, 0.02], dtype=float)
     )
     impedance_workspace_max: np.ndarray = field(
         default_factory=lambda: np.array([0.45, 0.10, 0.45], dtype=float)
