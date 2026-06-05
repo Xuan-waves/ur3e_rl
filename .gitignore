@@ -1,5 +1,11 @@
 Xrobot_tool/
 infer/
 XRoboToolkit-Teleop-Sample-Python/
+
 datasets/
 gitpass
+
+# vr_servoj_test/
+outputs/
+
+.cache/

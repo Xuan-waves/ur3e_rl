@@ -12,6 +12,8 @@ config_value() {
 DATASET_ROOT="$(config_value dataset_root)"
 DATASET_NAME="$(config_value dataset_name)"
 TASK="$(config_value task)"
+ACTION_POSITION_MODE="$(config_value action_position_mode)"
+ACTION_ORIENTATION_SOURCE="$(config_value action_orientation_source)"
 PREVIEW_TOPIC="$(config_value preview_topic)"
 REFERENCE_CAMERA="$(config_value reference_camera)"
 LAUNCH_REALSENSE_ROS=0
@@ -54,6 +56,10 @@ Options:
   --dataset-name NAME    Dataset session prefix. Default: CollectConfig.dataset_name.
   --task TEXT            Task text saved to LeRobot. Default: CollectConfig.task.
   --max-episodes N       Stop after saving N episodes. 0 means unlimited.
+  --action-position-mode relative|absolute
+                        Action position representation. Default: relative.
+  --action-orientation-source state|ik_target
+                        Action orientation source. Default: state.
   --d455-serial SERIAL   D455 serial. Auto-detected if omitted.
   --d405-serial SERIAL   D405 serial. Auto-detected if omitted.
   --d455-port PORT       D455 USB port id, e.g. 2-1. Auto-detected if omitted.
@@ -62,14 +68,14 @@ Options:
   --camera-height HEIGHT Default: 480.
   --camera-fps FPS       Default: 30.
   --preview-topic TOPIC  Default: /ur3e_vr/collection_preview.
-  --reference-camera front|wrist
-                        Camera used as data synchronization reference. Default: wrist.
+  --reference-camera front|wrist|timer
+                        Sync reference. Default: front.
   --camera-source realsense|ros
                         Default: ros. realsense is kept only as an experimental direct path.
-  --max-dt-front SEC    D455/front nearest-image tolerance. Default: 0.08.
-  --max-dt-wrist SEC    D405/wrist nearest-image tolerance. Default: 0.08.
-  --max-dt-state SEC    Robot state tolerance. Default: 0.08.
-  --max-dt-action SEC   IK target and VR command tolerance. Default: 0.08.
+  --max-dt-front SEC    D455/front nearest-image tolerance. Default: 0.04.
+  --max-dt-wrist SEC    D405/wrist nearest-image tolerance. Default: 0.04.
+  --max-dt-state SEC    Robot state tolerance. Default: 0.02.
+  --max-dt-action SEC   IK target and VR command tolerance. Default: 0.02.
   --allow-stale-front   Reuse the latest D455/front frame when debugging only.
   --launch-realsense-ros
                         Also open a camera tab using this project's RealSense helper.
@@ -105,6 +111,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --max-episodes)
             MAX_EPISODES="$2"
+            shift 2
+            ;;
+        --action-position-mode)
+            ACTION_POSITION_MODE="$2"
+            shift 2
+            ;;
+        --action-orientation-source)
+            ACTION_ORIENTATION_SOURCE="$2"
             shift 2
             ;;
         --d455-serial)
@@ -267,7 +281,7 @@ EOF
     chmod +x "$runner_path"
 }
 
-COLLECTOR_CMD="set +u; source /opt/ros/humble/setup.bash; set -u; python scripts/collect_data/collect_ur3e_vr_impedance.py --camera-source $(quote "$CAMERA_SOURCE") --dataset-root $(quote "$DATASET_ROOT") --dataset-name $(quote "$DATASET_NAME") --task $(quote "$TASK") --preview-topic $(quote "$PREVIEW_TOPIC") --no-preview-window --reference-camera $(quote "$REFERENCE_CAMERA") --camera-width $(quote "$CAMERA_WIDTH") --camera-height $(quote "$CAMERA_HEIGHT") --camera-fps $(quote "$CAMERA_FPS") --max-dt-front-image $(quote "$MAX_DT_FRONT_IMAGE") --max-dt-wrist-image $(quote "$MAX_DT_WRIST_IMAGE") --max-dt-state $(quote "$MAX_DT_STATE") --max-dt-action $(quote "$MAX_DT_ACTION") --max-episodes $(quote "$MAX_EPISODES") --status-hz $(quote "$STATUS_HZ") --no-launch-realsense-ros"
+COLLECTOR_CMD="set +u; source /opt/ros/humble/setup.bash; set -u; python scripts/collect_data/collect_ur3e_vr_impedance.py --camera-source $(quote "$CAMERA_SOURCE") --dataset-root $(quote "$DATASET_ROOT") --dataset-name $(quote "$DATASET_NAME") --task $(quote "$TASK") --action-position-mode $(quote "$ACTION_POSITION_MODE") --action-orientation-source $(quote "$ACTION_ORIENTATION_SOURCE") --preview-topic $(quote "$PREVIEW_TOPIC") --no-preview-window --reference-camera $(quote "$REFERENCE_CAMERA") --camera-width $(quote "$CAMERA_WIDTH") --camera-height $(quote "$CAMERA_HEIGHT") --camera-fps $(quote "$CAMERA_FPS") --max-dt-front-image $(quote "$MAX_DT_FRONT_IMAGE") --max-dt-wrist-image $(quote "$MAX_DT_WRIST_IMAGE") --max-dt-state $(quote "$MAX_DT_STATE") --max-dt-action $(quote "$MAX_DT_ACTION") --max-episodes $(quote "$MAX_EPISODES") --status-hz $(quote "$STATUS_HZ") --no-launch-realsense-ros"
 if [[ "$STATUS_PANEL" -eq 1 ]]; then
     COLLECTOR_CMD+=" --status-panel"
 else

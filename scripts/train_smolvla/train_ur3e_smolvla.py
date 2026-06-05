@@ -13,9 +13,10 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_DATASET = REPO_ROOT / "datasets" / "ur3e_lerobot_vr_impedance_20260531_172425"
-DEFAULT_OUTPUT_ROOT = REPO_ROOT / "outputs" / "train"
-DEFAULT_TASK = "Insert the Ethernet connector into the matching slot."
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.train_smolvla.config import CFG
 
 
 def str_bool(value: bool) -> str:
@@ -54,9 +55,12 @@ def summarize_dataset(root: Path) -> None:
             values = stats.get(key, {})
             mins = values.get("min") or []
             maxs = values.get("max") or []
-            if len(mins) >= 8 and len(maxs) >= 8:
-                print(f"[dataset] {label}.RL_mark min={mins[7]:.3f} max={maxs[7]:.3f}")
-                if abs(float(maxs[7]) - float(mins[7])) < 1e-6:
+            if len(mins) >= 2 and len(maxs) >= 2:
+                rl_idx = min(len(mins), len(maxs)) - 1
+                rl_min = float(mins[rl_idx])
+                rl_max = float(maxs[rl_idx])
+                print(f"[dataset] {label}.RL_mark[{rl_idx}] min={rl_min:.3f} max={rl_max:.3f}")
+                if abs(rl_max - rl_min) < 1e-6:
                     print(f"[warn] {label}.RL_mark has no variation in this dataset.")
 
 
@@ -64,7 +68,10 @@ def ensure_training_dependencies(*, strict: bool) -> None:
     required = ["torch", "lerobot", "accelerate", "av"]
     missing = [name for name in required if not check_module(name)]
     if missing:
-        raise RuntimeError(f"Missing required training modules: {', '.join(missing)}")
+        message = f"Missing required training modules: {', '.join(missing)}"
+        if strict:
+            raise RuntimeError(message)
+        print(f"[warn] {message}")
 
     missing_smolvla = [name for name in ["transformers"] if not check_module(name)]
     if missing_smolvla:
@@ -110,9 +117,7 @@ def make_train_command(args: argparse.Namespace, output_dir: Path) -> list[str]:
         f"--policy.num_vlm_layers={args.num_vlm_layers}",
         f"--policy.num_expert_layers={args.num_expert_layers}",
         f"--policy.expert_width_multiplier={args.expert_width_multiplier}",
-        "--policy.resize_imgs_with_padding",
-        str(args.image_size),
-        str(args.image_size),
+        f"--policy.resize_imgs_with_padding=[{args.image_size},{args.image_size}]",
         f"--batch_size={args.batch_size}",
         f"--steps={args.steps}",
         f"--num_workers={args.num_workers}",
@@ -132,35 +137,35 @@ def make_train_command(args: argparse.Namespace, output_dir: Path) -> list[str]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train SmolVLA on the UR3e VR impedance LeRobot dataset.")
-    parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
-    parser.add_argument("--repo-id", default=None, help="LeRobot repo_id label for local loading.")
-    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--dataset", type=Path, default=CFG.dataset)
+    parser.add_argument("--repo-id", default=CFG.repo_id, help="LeRobot repo_id label for local loading.")
+    parser.add_argument("--output-root", type=Path, default=CFG.output_root)
     parser.add_argument("--output-dir", type=Path, default=None)
-    parser.add_argument("--job-name", default="ur3e_smolvla")
-    parser.add_argument("--steps", type=int, default=1000)
-    parser.add_argument("--batch-size", type=int, default=2)
-    parser.add_argument("--num-workers", type=int, default=2)
-    parser.add_argument("--log-freq", type=int, default=20)
-    parser.add_argument("--save-freq", type=int, default=250)
-    parser.add_argument("--seed", type=int, default=1000)
-    parser.add_argument("--device", default="cuda")
-    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--use-imagenet-stats", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--vlm-model-name", default="HuggingFaceTB/SmolVLM2-500M-Video-Instruct")
-    parser.add_argument("--load-vlm-weights", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--freeze-vision-encoder", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--train-expert-only", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--train-state-proj", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--n-obs-steps", type=int, default=1)
-    parser.add_argument("--chunk-size", type=int, default=30)
-    parser.add_argument("--n-action-steps", type=int, default=30)
-    parser.add_argument("--max-state-dim", type=int, default=32)
-    parser.add_argument("--max-action-dim", type=int, default=32)
-    parser.add_argument("--image-size", type=int, default=256)
-    parser.add_argument("--num-vlm-layers", type=int, default=8)
-    parser.add_argument("--num-expert-layers", type=int, default=-1)
-    parser.add_argument("--expert-width-multiplier", type=float, default=0.5)
-    parser.add_argument("--tolerance-s", type=float, default=1e-4)
+    parser.add_argument("--job-name", default=CFG.job_name)
+    parser.add_argument("--steps", type=int, default=CFG.steps)
+    parser.add_argument("--batch-size", type=int, default=CFG.batch_size)
+    parser.add_argument("--num-workers", type=int, default=CFG.num_workers)
+    parser.add_argument("--log-freq", type=int, default=CFG.log_freq)
+    parser.add_argument("--save-freq", type=int, default=CFG.save_freq)
+    parser.add_argument("--seed", type=int, default=CFG.seed)
+    parser.add_argument("--device", default=CFG.device)
+    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=CFG.amp)
+    parser.add_argument("--use-imagenet-stats", action=argparse.BooleanOptionalAction, default=CFG.use_imagenet_stats)
+    parser.add_argument("--vlm-model-name", default=CFG.vlm_model_name)
+    parser.add_argument("--load-vlm-weights", action=argparse.BooleanOptionalAction, default=CFG.load_vlm_weights)
+    parser.add_argument("--freeze-vision-encoder", action=argparse.BooleanOptionalAction, default=CFG.freeze_vision_encoder)
+    parser.add_argument("--train-expert-only", action=argparse.BooleanOptionalAction, default=CFG.train_expert_only)
+    parser.add_argument("--train-state-proj", action=argparse.BooleanOptionalAction, default=CFG.train_state_proj)
+    parser.add_argument("--n-obs-steps", type=int, default=CFG.n_obs_steps)
+    parser.add_argument("--chunk-size", type=int, default=CFG.chunk_size)
+    parser.add_argument("--n-action-steps", type=int, default=CFG.n_action_steps)
+    parser.add_argument("--max-state-dim", type=int, default=CFG.max_state_dim)
+    parser.add_argument("--max-action-dim", type=int, default=CFG.max_action_dim)
+    parser.add_argument("--image-size", type=int, default=CFG.image_size)
+    parser.add_argument("--num-vlm-layers", type=int, default=CFG.num_vlm_layers)
+    parser.add_argument("--num-expert-layers", type=int, default=CFG.num_expert_layers)
+    parser.add_argument("--expert-width-multiplier", type=float, default=CFG.expert_width_multiplier)
+    parser.add_argument("--tolerance-s", type=float, default=CFG.tolerance_s)
     parser.add_argument("--dry-run", action="store_true", help="Print command and validate dataset without training.")
     parser.add_argument(
         "--skip-dependency-check",
@@ -187,8 +192,8 @@ def main() -> int:
     if not output_dir.is_absolute():
         output_dir = (REPO_ROOT / output_dir).resolve()
 
-    os.environ.setdefault("HF_HOME", str(REPO_ROOT / ".cache" / "huggingface"))
-    os.environ.setdefault("HF_DATASETS_CACHE", str(REPO_ROOT / ".cache" / "huggingface" / "datasets"))
+    os.environ.setdefault("HF_HOME", str(CFG.hf_home))
+    os.environ.setdefault("HF_DATASETS_CACHE", str(CFG.hf_home / "datasets"))
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
     summarize_dataset(dataset)

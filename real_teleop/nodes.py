@@ -11,6 +11,7 @@ from scipy.spatial.transform import Rotation as R
 
 from .config import (
     TOPIC_IK_TARGET,
+    TOPIC_COMMANDED_JOINT_TARGET,
     TOPIC_JOINT_TARGET,
     TOPIC_ROBOT_DEBUG,
     TOPIC_ROBOT_STATE,
@@ -64,17 +65,20 @@ class IkNode:
 
         self.node = rclpy_node
         self.cfg = cfg
-        self.dt = 1.0 / cfg.control_hz
         self.safety = SafetyLimiter(cfg)
         from .kinematics import MinkIkSolver, RobotKinematics
 
         self.use_impedance_target = cfg.robot_control_mode == "impedance"
+        self.control_hz = cfg.control_hz if self.use_impedance_target else cfg.servoj_control_hz
+        self.dt = 1.0 / self.control_hz
         self.track_vr_orientation = bool(cfg.vr_track_orientation)
         self.pose_kin = RobotKinematics(cfg)
         self.ik = None if self.use_impedance_target else MinkIkSolver(cfg)
         self.home_tcp_pos, self.home_tcp_quat = self.pose_kin.forward(cfg.hardware_home_q)
-        self.ctrl_filter = PoseFilter(cfg.ctrl_filter_alpha, cfg.ctrl_filter_alpha)
-        self.target_filter = PoseFilter(cfg.target_filter_alpha, cfg.target_filter_alpha)
+        ctrl_alpha = cfg.ctrl_filter_alpha if self.use_impedance_target else cfg.servoj_ctrl_filter_alpha
+        target_alpha = cfg.target_filter_alpha if self.use_impedance_target else cfg.servoj_target_filter_alpha
+        self.ctrl_filter = PoseFilter(ctrl_alpha, ctrl_alpha)
+        self.target_filter = PoseFilter(target_alpha, target_alpha)
 
         self.state: Optional[dict] = None
         self.command: Optional[dict] = None
@@ -82,6 +86,8 @@ class IkNode:
         self.anchor_ctrl_quat: Optional[np.ndarray] = None
         self.anchor_tcp_pos: Optional[np.ndarray] = None
         self.anchor_tcp_quat: Optional[np.ndarray] = None
+        self.hold_tcp_pos: Optional[np.ndarray] = None
+        self.hold_tcp_quat: Optional[np.ndarray] = None
         self.last_target_pos: Optional[np.ndarray] = None
         self.last_target_quat: Optional[np.ndarray] = None
         self.last_q_target: Optional[np.ndarray] = None
@@ -121,7 +127,7 @@ class IkNode:
         if enable_twin:
             self._init_twin()
         self.node.get_logger().info(
-            f"IK node running typed ROS2 {'pose targets' if self.use_impedance_target else 'mink'} at {cfg.control_hz:.0f} Hz"
+            f"IK node running typed ROS2 {'pose targets' if self.use_impedance_target else 'mink'} at {self.control_hz:.0f} Hz"
             + (f", MuJoCo twin at {cfg.twin_hz:.0f} Hz" if self.twin_enabled else "")
             + (", fixed EE orientation from hardware home" if cfg.fixed_ee_orientation else "")
         )
@@ -176,7 +182,13 @@ class IkNode:
     def tracking(self) -> bool:
         return self.anchor_tcp_pos is not None
 
-    def _release(self) -> None:
+    def _release(self, *, latch_hold: bool = False, clear_hold: bool = False) -> None:
+        was_tracking = self.anchor_tcp_pos is not None
+        if clear_hold:
+            self.hold_tcp_pos = None
+            self.hold_tcp_quat = None
+        elif latch_hold and (was_tracking or self.hold_tcp_pos is None):
+            self._latch_hold_from_state()
         self.anchor_ctrl_pos = None
         self.anchor_ctrl_quat = None
         self.anchor_tcp_pos = None
@@ -187,23 +199,38 @@ class IkNode:
         self.ctrl_filter.reset()
         self.target_filter.reset()
 
+    def _latch_hold_from_state(self) -> bool:
+        if self.state is None:
+            return False
+        try:
+            self.hold_tcp_pos = as_vec(self.state.get("tcp_pos"), 3).copy()
+            self.hold_tcp_quat = _norm_quat(as_vec(self.state.get("tcp_quat"), 4))
+            return True
+        except Exception as exc:
+            self.node.get_logger().warn(f"Failed to latch hold pose: {exc}")
+            return False
+
     def _tick(self) -> None:
         if self.state is None or self.command is None:
             return
         if now() - float(self.command.get("stamp", 0.0)) > self.cfg.stale_command_s:
-            self._release()
+            self._release(latch_hold=True)
             self._publish_hold("stale_vr")
             return
 
         home = bool(self.command.get("home", False))
+        robot_homing = bool(self.state.get("homing", False))
         if home and not self.last_home:
-            self._release()
-            self._publish_hold("home")
+            self._release(clear_hold=True)
+        if home or robot_homing:
+            self._publish_hold("home", publish_pose_target=False)
+            self.last_home = home
+            return
         self.last_home = home
 
         pose = self.command.get("pose")
         if not bool(self.command.get("enable", False)) or pose is None:
-            self._release()
+            self._release(latch_hold=True)
             self._publish_hold("disabled")
             return
 
@@ -218,17 +245,26 @@ class IkNode:
 
         ctrl_pos, ctrl_quat = ctrl_pose[:3], ctrl_pose[3:]
         if not self.tracking:
+            self._release(clear_hold=True)
             self._anchor(ctrl_pos, ctrl_quat, tcp_pos, tcp_quat)
             self._publish_hold("anchored")
             return
 
-        target_pos, target_quat = self._target_from_controller(ctrl_pos, ctrl_quat)
+        target_pos, target_quat = (
+            self._impedance_target_from_controller(ctrl_pos, ctrl_quat)
+            if self.use_impedance_target
+            else self._servoj_target_from_controller(ctrl_pos, ctrl_quat)
+        )
         target_pos = (
             self.safety.clamp_impedance_workspace(target_pos)
             if self.use_impedance_target
             else self.safety.clamp_workspace(target_pos)
         )
-        target_pos, target_quat = self._stabilize_target_pose(target_pos, target_quat)
+        target_pos, target_quat = (
+            self._stabilize_impedance_target_pose(target_pos, target_quat)
+            if self.use_impedance_target
+            else self._stabilize_servoj_target_pose(target_pos, target_quat)
+        )
 
         if self.use_impedance_target:
             self._publish_pose_target(target_pos, target_quat)
@@ -264,20 +300,52 @@ class IkNode:
         self.last_target_pos = None
         self.last_target_quat = None
         self.last_q_target = None
+        self.hold_tcp_pos = tcp_pos.copy()
+        self.hold_tcp_quat = _norm_quat(tcp_quat)
 
-    def _target_from_controller(self, ctrl_pos: np.ndarray, ctrl_quat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def _impedance_target_from_controller(
+        self,
+        ctrl_pos: np.ndarray,
+        ctrl_quat: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
         ctrl_pos_f, ctrl_quat_f = self.ctrl_filter(self._translation_control_pos(ctrl_pos, ctrl_quat), ctrl_quat)
-        dpos = (ctrl_pos_f - self.anchor_ctrl_pos) * self.cfg.scale
+        sign = np.asarray(self.cfg.vr_control_position_sign, dtype=float)
+        if sign.shape != (3,):
+            sign = np.ones(3, dtype=float)
+        dpos = (ctrl_pos_f - self.anchor_ctrl_pos) * sign * self.cfg.scale
         drot = (R.from_quat(ctrl_quat_f) * R.from_quat(self.anchor_ctrl_quat).inv()).as_rotvec()
-        if np.linalg.norm(dpos) < self.cfg.dead_zone_pos:
-            dpos[:] = 0.0
-        if np.linalg.norm(drot) < self.cfg.dead_zone_rot:
-            drot[:] = 0.0
+        dpos = _radial_deadzone(dpos, self.cfg.dead_zone_pos)
+        drot = _radial_deadzone(drot, self.cfg.dead_zone_rot)
         pos = self.anchor_tcp_pos + dpos
-        if self.use_impedance_target and not self.track_vr_orientation:
+        if not self.track_vr_orientation:
             quat = self.home_tcp_quat.copy()
         elif self.cfg.fixed_ee_orientation:
-            quat = self.anchor_tcp_quat.copy() if self.use_impedance_target else self.home_tcp_quat.copy()
+            quat = self.anchor_tcp_quat.copy()
+        else:
+            quat = (R.from_rotvec(drot) * R.from_quat(self.anchor_tcp_quat)).as_quat()
+        return self.target_filter(pos, quat)
+
+    def _servoj_target_from_controller(
+        self,
+        ctrl_pos: np.ndarray,
+        ctrl_quat: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        ctrl_pos_f, ctrl_quat_f = self.ctrl_filter(self._translation_control_pos(ctrl_pos, ctrl_quat), ctrl_quat)
+        pos_sign = np.asarray(self.cfg.servoj_control_position_sign, dtype=float)
+        if pos_sign.shape != (3,):
+            pos_sign = np.ones(3, dtype=float)
+        rot_sign = np.asarray(self.cfg.servoj_control_rotation_sign, dtype=float)
+        if rot_sign.shape != (3,):
+            rot_sign = np.ones(3, dtype=float)
+
+        dpos = (ctrl_pos_f - self.anchor_ctrl_pos) * pos_sign * self.cfg.scale
+        drot = (R.from_quat(ctrl_quat_f) * R.from_quat(self.anchor_ctrl_quat).inv()).as_rotvec() * rot_sign
+        dpos = _radial_deadzone(dpos, self.cfg.servoj_dead_zone_pos)
+        drot = _radial_deadzone(drot, self.cfg.servoj_dead_zone_rot)
+
+        pos = self.anchor_tcp_pos + dpos
+        if self.cfg.fixed_ee_orientation:
+            quat = self.home_tcp_quat.copy()
         else:
             quat = (R.from_rotvec(drot) * R.from_quat(self.anchor_tcp_quat)).as_quat()
         return self.target_filter(pos, quat)
@@ -291,7 +359,41 @@ class IkNode:
             return pos.copy()
         return pos + R.from_quat(_norm_quat(ctrl_quat)).apply(offset)
 
-    def _stabilize_target_pose(self, target_pos: np.ndarray, target_quat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def _stabilize_impedance_target_pose(
+        self,
+        target_pos: np.ndarray,
+        target_quat: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        return self._stabilize_target_pose(
+            target_pos,
+            target_quat,
+            pos_hold_epsilon=self.cfg.target_pos_hold_epsilon,
+            rot_hold_epsilon=self.cfg.target_rot_hold_epsilon,
+            max_target_jump=self.cfg.max_target_jump,
+        )
+
+    def _stabilize_servoj_target_pose(
+        self,
+        target_pos: np.ndarray,
+        target_quat: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        return self._stabilize_target_pose(
+            target_pos,
+            target_quat,
+            pos_hold_epsilon=self.cfg.servoj_target_pos_hold_epsilon,
+            rot_hold_epsilon=self.cfg.servoj_target_rot_hold_epsilon,
+            max_target_jump=self.cfg.servoj_max_target_jump,
+        )
+
+    def _stabilize_target_pose(
+        self,
+        target_pos: np.ndarray,
+        target_quat: np.ndarray,
+        *,
+        pos_hold_epsilon: float,
+        rot_hold_epsilon: float,
+        max_target_jump: float,
+    ) -> tuple[np.ndarray, np.ndarray]:
         target_quat = _norm_quat(target_quat)
         if self.last_target_pos is None or self.last_target_quat is None:
             self.last_target_pos = target_pos.copy()
@@ -300,15 +402,15 @@ class IkNode:
 
         jump = target_pos - self.last_target_pos
         norm = float(np.linalg.norm(jump))
-        if norm < self.cfg.target_pos_hold_epsilon:
+        if norm < pos_hold_epsilon:
             target_pos = self.last_target_pos.copy()
-        elif norm > self.cfg.max_target_jump:
-            target_pos = self.last_target_pos + jump / norm * self.cfg.max_target_jump
+        elif norm > max_target_jump:
+            target_pos = self.last_target_pos + jump / norm * max_target_jump
 
         rot_delta = (
             R.from_quat(target_quat) * R.from_quat(self.last_target_quat).inv()
         ).as_rotvec()
-        if float(np.linalg.norm(rot_delta)) < self.cfg.target_rot_hold_epsilon:
+        if float(np.linalg.norm(rot_delta)) < rot_hold_epsilon:
             target_quat = self.last_target_quat.copy()
 
         self.last_target_pos = target_pos.copy()
@@ -317,18 +419,27 @@ class IkNode:
 
     def _stabilize_joint_target(self, q: np.ndarray) -> np.ndarray:
         if self.last_q_target is not None:
-            if float(np.max(np.abs(q - self.last_q_target))) < self.cfg.ik_joint_deadband:
+            if float(np.max(np.abs(q - self.last_q_target))) < self.cfg.servoj_ik_joint_deadband:
                 return self.last_q_target.copy()
         self.last_q_target = q.copy()
         return q
 
-    def _publish_hold(self, reason: str) -> None:
+    def _publish_hold(self, reason: str, *, publish_pose_target: bool = True) -> None:
         from std_msgs.msg import Float64MultiArray
 
         gripper = float(self.command.get("gripper", 0.0)) if self.command else 0.0
         msg = Float64MultiArray()
         msg.data = make_joint_target(tracking=False, gripper=gripper, reason=reason)
         self.target_pub.publish(msg)
+        if not publish_pose_target:
+            return
+        if self.hold_tcp_pos is None or self.hold_tcp_quat is None:
+            self._latch_hold_from_state()
+        if self.hold_tcp_pos is None or self.hold_tcp_quat is None:
+            return
+        target_msg = Float64MultiArray()
+        target_msg.data = make_ik_target(self.hold_tcp_pos, self.hold_tcp_quat)
+        self.ik_target_pub.publish(target_msg)
 
     def _publish_target(
         self,
@@ -402,9 +513,10 @@ class RobotNode:
 
         self.node = rclpy_node
         self.cfg = cfg
-        self.dt = 1.0 / cfg.control_hz
         self.dry_run = dry_run
         self.control_mode = cfg.robot_control_mode
+        self.control_hz = cfg.control_hz if self.control_mode == "impedance" else cfg.servoj_control_hz
+        self.dt = 1.0 / self.control_hz
         self.safety = SafetyLimiter(cfg)
         from .kinematics import RobotKinematics
 
@@ -418,6 +530,7 @@ class RobotNode:
         self.actual_group = MutuallyExclusiveCallbackGroup()
         self.gripper_group = MutuallyExclusiveCallbackGroup()
         self.pub = self.node.create_publisher(Float64MultiArray, TOPIC_ROBOT_STATE, qos)
+        self.commanded_joint_pub = self.node.create_publisher(Float64MultiArray, TOPIC_COMMANDED_JOINT_TARGET, qos)
         self.debug_pub = self.node.create_publisher(String, TOPIC_ROBOT_DEBUG, 10)
         self.target_sub = self.node.create_subscription(
             Float64MultiArray,
@@ -447,6 +560,9 @@ class RobotNode:
         self.impedance_track_vr_orientation = True
         self.impedance_home_rotvec: Optional[np.ndarray] = None
         self.current_q = self._home_q()
+        self.actual_q = self.current_q.copy()
+        self.actual_tcp_pos, self.actual_tcp_quat = self.kin.forward(self.actual_q)
+        self.actual_stamp = now()
         self.target_q: Optional[np.ndarray] = None
         self.filtered_target_q: Optional[np.ndarray] = None
         self.target_tcp_pos: Optional[np.ndarray] = None
@@ -459,6 +575,7 @@ class RobotNode:
         self.target_count = 0
         self.last_target_delta = 0.0
         self.last_q_step = 0.0
+        self.last_target_ok = True
         self.last_debug_log = 0.0
         self.last_debug_pub = 0.0
         self.servo_active = False
@@ -476,14 +593,20 @@ class RobotNode:
                 cfg.robot_ip,
                 auto_connect=True,
                 servo_time=self.dt,
-                lookahead_time=0.06,
-                servo_gain=120.0,
+                lookahead_time=cfg.servoj_lookahead_time,
+                servo_gain=cfg.servoj_gain,
             )
             try:
                 self.robot.attach_gripper()
             except Exception as exc:
                 self.node.get_logger().warn(f"Gripper not attached: {exc}")
-            self._set_current_q(self.robot.get_joint_positions())
+            initial_stamp = now()
+            initial_q = self.robot.get_joint_positions()
+            self._set_current_q(initial_q)
+            if self.control_mode == "impedance":
+                self._set_actual_state(initial_q, tcp_pose=self.robot.get_tcp_pose(), stamp=initial_stamp)
+            else:
+                self._set_actual_state(initial_q, stamp=initial_stamp)
             if self.control_mode == "impedance":
                 self._init_impedance_motion()
 
@@ -507,7 +630,7 @@ class RobotNode:
             )
         mode = "dry-run" if dry_run else f"real robot {cfg.robot_ip}"
         self.node.get_logger().info(
-            f"Robot node {self.control_mode} controlling {mode} at {cfg.control_hz:.0f} Hz, "
+            f"Robot node {self.control_mode} controlling {mode} at {self.control_hz:.0f} Hz, "
             f"state publishing at {cfg.robot_state_hz:.0f} Hz"
         )
 
@@ -570,6 +693,36 @@ class RobotNode:
         with self.data_lock:
             self.current_q = np.asarray(q, dtype=float).copy()
 
+    def _set_actual_state(
+        self,
+        q: np.ndarray,
+        *,
+        tcp_pose: np.ndarray | None = None,
+        tcp_pos: np.ndarray | None = None,
+        tcp_quat: np.ndarray | None = None,
+        stamp: float | None = None,
+    ) -> None:
+        q = np.asarray(q, dtype=float).copy()
+        if tcp_pose is not None:
+            pose = np.asarray(tcp_pose, dtype=float)
+            tcp_pos = pose[:3]
+            tcp_quat = R.from_rotvec(pose[3:]).as_quat()
+        if tcp_pos is None or tcp_quat is None:
+            tcp_pos, tcp_quat = self.kin.forward(q)
+        with self.data_lock:
+            self.actual_q = q
+            self.actual_tcp_pos = np.asarray(tcp_pos, dtype=float).copy()
+            self.actual_tcp_quat = _norm_quat(np.asarray(tcp_quat, dtype=float))
+            self.actual_stamp = now() if stamp is None else float(stamp)
+
+    def _get_publish_state_snapshot(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+        with self.data_lock:
+            if self.dry_run:
+                q = self.current_q.copy()
+                tcp_pos, tcp_quat = self.kin.forward(q)
+                return q, tcp_pos, tcp_quat, now()
+            return self.actual_q.copy(), self.actual_tcp_pos.copy(), self.actual_tcp_quat.copy(), self.actual_stamp
+
     def _on_target(self, msg) -> None:
         try:
             payload = parse_joint_target(msg.data)
@@ -587,6 +740,11 @@ class RobotNode:
             self.target_stamp = float(payload.get("stamp", 0.0))
             self.target_reason = str(payload.get("reason", "tracking" if self.target_tracking else "hold"))
             self.target_count += 1
+            self.last_target_ok = bool(payload.get("ok", True))
+            if self.target_tracking and not self.last_target_ok:
+                self.target_reason = "ik_failed"
+                self.desired_gripper = float(np.clip(payload.get("gripper", self.desired_gripper), 0.0, 1.0))
+                return
             q = payload.get("q")
             if q is not None:
                 q = as_vec(q, 6)
@@ -596,7 +754,7 @@ class RobotNode:
                     if self.filtered_target_q is None:
                         self.filtered_target_q = q.copy()
                     else:
-                        alpha = float(np.clip(self.cfg.joint_target_alpha, 0.0, 1.0))
+                        alpha = float(np.clip(self.cfg.servoj_joint_target_alpha, 0.0, 1.0))
                         self.filtered_target_q = alpha * q + (1.0 - alpha) * self.filtered_target_q
             else:
                 self.target_q = None
@@ -607,6 +765,8 @@ class RobotNode:
 
     def _on_pose_target(self, msg) -> None:
         if self.control_mode != "impedance":
+            return
+        if self.homing:
             return
         try:
             payload = parse_ik_target(msg.data)
@@ -663,7 +823,13 @@ class RobotNode:
             self.node.get_logger().info("A pressed: moveJ return to home")
             move_to_home = getattr(self.robot, "move_to_home", self.robot.go_home)
             move_to_home()
-            self._set_current_q(self.robot.get_joint_positions())
+            actual_stamp = now()
+            actual_q = self.robot.get_joint_positions()
+            self._set_current_q(actual_q)
+            if self.control_mode == "impedance":
+                self._set_actual_state(actual_q, tcp_pose=self.robot.get_tcp_pose(), stamp=actual_stamp)
+            else:
+                self._set_actual_state(actual_q, stamp=actual_stamp)
             if self.control_mode == "impedance":
                 self.impedance_home_rotvec = self._read_actual_tcp_rotvec()
         except Exception as exc:
@@ -696,34 +862,71 @@ class RobotNode:
         if self.dry_run or self.robot is None:
             return
         try:
+            stamp = now()
             actual_q = self.robot.get_joint_positions()
+            actual_tcp_pose = self.robot.get_tcp_pose() if self.control_mode == "impedance" else None
         except Exception as exc:
-            self.node.get_logger().warn(f"Failed to read robot joints: {exc}")
+            self.node.get_logger().warn(f"Failed to read robot state: {exc}")
             return
+        self._set_actual_state(actual_q, tcp_pose=actual_tcp_pose, stamp=stamp)
         if self.control_mode == "impedance" or self.homing or not self.servo_active:
             self._set_current_q(actual_q)
 
     def _apply_servo(self) -> None:
-        fresh = now() - self.target_stamp <= self.cfg.stale_target_s
+        fresh = now() - self.target_stamp <= self.cfg.servoj_stale_target_s
         if self.homing or not self.target_tracking or self.target_q is None or not fresh:
+            self._publish_commanded_joint_target(
+                tracking=False,
+                q=self._get_current_q(),
+                reason="stale_vr" if self.target_tracking and not fresh else self.target_reason,
+            )
             self._servo_stop()
             return
         target_q = self.filtered_target_q if self.filtered_target_q is not None else self.target_q
         current_q = self._get_current_q()
-        q_cmd = self.safety.limit_step(current_q, target_q, self.dt)
+        q_cmd = self.safety.limit_step(
+            current_q,
+            target_q,
+            self.dt,
+            max_joint_step=self.cfg.servoj_max_joint_step,
+            max_joint_speed=self.cfg.servoj_max_joint_speed,
+        )
         self.last_target_delta = float(np.max(np.abs(target_q - current_q)))
         self.last_q_step = float(np.max(np.abs(q_cmd - current_q)))
         if self.dry_run:
             self._set_current_q(q_cmd)
             self.servo_active = True
+            self._publish_commanded_joint_target(tracking=True, q=q_cmd, reason="tracking")
             return
         try:
             self.robot.servo_joints(q_cmd)
             self._set_current_q(q_cmd)
             self.servo_active = True
+            self._publish_commanded_joint_target(tracking=True, q=q_cmd, reason="tracking")
         except Exception as exc:
             self.node.get_logger().error(f"servoJ failed: {exc}")
+            self._publish_commanded_joint_target(tracking=False, reason="hold")
             self._servo_stop()
+
+    def _publish_commanded_joint_target(
+        self,
+        *,
+        tracking: bool,
+        q: np.ndarray | None = None,
+        reason: str = "tracking",
+    ) -> None:
+        from std_msgs.msg import Float64MultiArray
+
+        msg = Float64MultiArray()
+        msg.data = make_joint_target(
+            tracking=tracking,
+            q=q,
+            gripper=self.desired_gripper,
+            reason=reason,
+            ok=tracking,
+            q_delta=self.last_q_step,
+        )
+        self.commanded_joint_pub.publish(msg)
 
     def _servo_stop(self) -> None:
         if self.control_mode == "impedance":
@@ -875,14 +1078,8 @@ class RobotNode:
     def _publish_state(self) -> None:
         from std_msgs.msg import Float64MultiArray
 
-        q = self._get_current_q()
         try:
-            if self.control_mode == "impedance" and not self.dry_run and self.robot is not None:
-                pose = self.robot.get_tcp_pose()
-                tcp_pos = pose[:3]
-                tcp_quat = R.from_rotvec(pose[3:]).as_quat()
-            else:
-                tcp_pos, tcp_quat = self.kin.forward(q)
+            q, tcp_pos, tcp_quat, state_stamp = self._get_publish_state_snapshot()
         except Exception as exc:
             self.node.get_logger().warn(f"TCP state failed: {exc}")
             return
@@ -897,6 +1094,7 @@ class RobotNode:
             homing=self.homing,
             target_tracking=self.target_tracking,
             target_age=age,
+            stamp=state_stamp,
         )
         self.pub.publish(msg)
         if now() - self.last_debug_pub >= 0.1:
@@ -908,6 +1106,16 @@ class RobotNode:
 
         age = float(now() - self.target_stamp) if self.target_stamp > 0.0 else None
         q = self._get_current_q()
+        step_limit = (
+            float(min(self.cfg.servoj_max_joint_step, self.cfg.servoj_max_joint_speed * self.dt))
+            if self.control_mode == "servoj"
+            else None
+        )
+        saturated = (
+            bool(step_limit is not None and self.last_target_delta > step_limit and self.last_q_step >= 0.98 * step_limit)
+            if step_limit is not None
+            else False
+        )
         payload = {
             "count": int(self.target_count),
             "tracking": bool(self.target_tracking),
@@ -915,6 +1123,9 @@ class RobotNode:
             "reason": self.target_reason,
             "delta": float(self.last_target_delta),
             "step": float(self.last_q_step),
+            "step_limit": step_limit,
+            "saturated": saturated,
+            "ik_ok": bool(self.last_target_ok),
             "servo": bool(self.servo_active),
             "soft_hold": bool(self.soft_hold_active),
             "mode": self.control_mode,
@@ -933,6 +1144,7 @@ class RobotNode:
                 f"count={payload['count']} tracking={payload['tracking']} "
                 f"age={payload['age']} reason={payload['reason']} "
                 f"delta={payload['delta']:.6f} step={payload['step']:.6f} "
+                f"limit={payload['step_limit']} saturated={payload['saturated']} ik_ok={payload['ik_ok']} "
                 f"servo={payload['servo']} soft_hold={payload['soft_hold']} mode={payload['mode']}"
             )
 
@@ -949,3 +1161,12 @@ def _norm_quat(q: np.ndarray) -> np.ndarray:
     if n < 1e-9:
         return np.array([0.0, 0.0, 0.0, 1.0], dtype=float)
     return q / n
+
+
+def _radial_deadzone(value: np.ndarray, deadzone: float) -> np.ndarray:
+    value = np.asarray(value, dtype=float)
+    norm = float(np.linalg.norm(value))
+    deadzone = max(float(deadzone), 0.0)
+    if norm <= deadzone or norm < 1e-12:
+        return np.zeros_like(value)
+    return value * ((norm - deadzone) / norm)

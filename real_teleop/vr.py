@@ -31,6 +31,7 @@ class XrobotVrReader:
             "stop_collection": False,
             "left_grip": 0.0,
         }
+        self._enabled = False
 
     def read(self) -> dict:
         raw_pose = self._safe(lambda: self.xr.get_pose_by_name("right_controller"))
@@ -47,9 +48,16 @@ class XrobotVrReader:
                 quat = (self._headset_rot * R.from_quat(q) * self._headset_rot.inv()).as_quat()
                 pose = np.concatenate([pos, quat]).tolist()
 
+        on_threshold = float(self.cfg.enable_threshold)
+        off_threshold = float(getattr(self.cfg, "enable_release_threshold", on_threshold))
+        if self._enabled:
+            self._enabled = grip > off_threshold
+        else:
+            self._enabled = grip > on_threshold
+
         return {
             "pose": pose,
-            "enable": grip > self.cfg.enable_threshold,
+            "enable": self._enabled,
             "enable_value": float(np.clip(grip, 0.0, 1.0)),
             "gripper": float(np.clip(trigger, 0.0, self.cfg.gripper_command_max)),
             "home": a_btn,

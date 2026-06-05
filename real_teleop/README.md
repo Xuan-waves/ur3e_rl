@@ -15,6 +15,7 @@ High-rate control topics use `std_msgs/msg/Float64MultiArray`, best-effort `keep
 - `/ur3e_vr/vr_command`: 100 Hz VR pose, enable, gripper, home button.
 - `/ur3e_vr/robot_state`: 200 Hz current joint state plus FK TCP pose.
 - `/ur3e_vr/joint_target`: 200 Hz IK output joint target for servoJ.
+- `/ur3e_vr/commanded_joint_target`: robot-node servoJ target after robot-side filtering and step limiting.
 - `/ur3e_vr/ik_target`: target TCP pose for MuJoCo visualization.
 
 ## Run
@@ -105,6 +106,14 @@ Smoothing parameters live in `real_teleop/config.py`:
 - `ctrl_filter_alpha`: VR controller pose EMA.
 - `target_filter_alpha`: TCP target pose EMA before IK.
 - `joint_target_alpha`: robot-side joint target EMA before servoJ.
+- `servoj_control_hz`: servoJ-only IK and robot control frequency. The reference hardware bridge uses 400 Hz.
+- `vr_control_position_sign`: sign flip for controller position delta in impedance mode.
+- `servoj_control_position_sign`: sign flip for controller position delta in servoJ mode. Use these sign parameters for teleop direction fixes instead of changing the raw VR coordinate transform.
+- `servoj_control_rotation_sign`: sign flip for controller rotation delta rotvec in servoJ mode.
+- `servoj_ctrl_filter_alpha`, `servoj_target_filter_alpha`, `servoj_joint_target_alpha`: servoJ-only smoothing. Higher alpha follows faster; lower alpha is smoother.
+- `servoj_dead_zone_pos`, `servoj_dead_zone_rot`, `servoj_target_pos_hold_epsilon`, `servoj_target_rot_hold_epsilon`, `servoj_ik_joint_deadband`: servoJ-only small-motion suppression for static jitter.
+- `servoj_max_joint_speed`, `servoj_max_joint_step`, `servoj_max_target_jump`, `servoj_stale_target_s`: servoJ-only speed, jump, and stale-target limits. Too small can feel like stop-and-catch-up.
+- `servoj_lookahead_time`, `servoj_gain`: RTDE servoJ internal parameters. The reference bridge uses `lookahead=0.10`, `gain=100`.
 - `fixed_ee_orientation`: if `True`, VR controls TCP position only and keeps TCP orientation fixed at the hardware-home end-effector orientation.
 - `target_pos_hold_epsilon`, `target_rot_hold_epsilon`, `ik_joint_deadband`: hold tiny target/IK changes to suppress micro-jitter.
 - `max_joint_speed` / `max_joint_step`: robot-side joint speed limiting.

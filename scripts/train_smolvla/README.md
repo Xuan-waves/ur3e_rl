@@ -2,6 +2,14 @@
 
 本目录用于在当前 UR3e VR 阻抗采集数据上启动 LeRobot SmolVLA 训练。
 
+默认训练参数集中放在：
+
+```bash
+scripts/train_smolvla/config.py
+```
+
+命令行参数仍可临时覆盖 config 里的默认值。
+
 默认数据集：
 
 ```bash
@@ -64,22 +72,20 @@ outputs/train/ur3e_smolvla_YYYYmmdd_HHMMSS
 小数据集起步训练：
 
 ```bash
-python scripts/train_smolvla/train_ur3e_smolvla.py \
-  --steps 1000 \
-  --batch-size 2 \
-  --save-freq 250 \
-  --log-freq 20
+python scripts/train_smolvla/train_ur3e_smolvla.py
 ```
 
-显存足够时可增加 batch 和图像尺寸：
+当前默认按 24GB 显存设置：
 
-```bash
-python scripts/train_smolvla/train_ur3e_smolvla.py \
-  --steps 3000 \
-  --batch-size 4 \
-  --image-size 512 \
-  --save-freq 500
-```
+- `batch_size=4`
+- `steps=5000`
+- `chunk_size=50`
+- `n_action_steps=50`
+- `image_size=256`
+- `num_workers=4`
+
+如果 CUDA OOM，优先把 `batch_size` 从 4 降到 2；如果显存仍有余量，可尝试把
+`image_size` 从 256 提到 384 或 512。
 
 使用预训练 SmolVLM 权重初始化 VLM：
 
@@ -94,8 +100,8 @@ python scripts/train_smolvla/train_ur3e_smolvla.py \
 
 - `--dataset`: 本地 LeRobot 数据集路径。
 - `--steps`: policy update 步数。
-- `--batch-size`: DataLoader batch size。SmolVLA 比较吃显存，先从 1 或 2 开始。
-- `--chunk-size` / `--n-action-steps`: 一次预测的动作窗口，默认 30 帧，即 30Hz 下约 1 秒。
+- `--batch-size`: DataLoader batch size。默认 4，面向 24GB 显存。
+- `--chunk-size` / `--n-action-steps`: 一次预测的动作窗口，默认 50 帧，即 30Hz 下约 1.67 秒。
 - `--image-size`: SmolVLA 输入图像 padding 后尺寸，默认 256。
 - `--num-vlm-layers`: 使用的 VLM 层数，默认 8，用于降低初期训练成本。
 - `--load-vlm-weights`: 从 `--vlm-model-name` 加载 VLM 预训练权重。默认关闭，避免第一次训练必须下载大权重。

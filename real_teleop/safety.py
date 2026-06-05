@@ -29,7 +29,17 @@ class SafetyLimiter:
             and np.all(q <= self.cfg.joint_limits[:, 1])
         )
 
-    def limit_step(self, current_q: np.ndarray, target_q: np.ndarray, dt: float) -> np.ndarray:
-        max_step = min(self.cfg.max_joint_step, self.cfg.max_joint_speed * dt)
+    def limit_step(
+        self,
+        current_q: np.ndarray,
+        target_q: np.ndarray,
+        dt: float,
+        *,
+        max_joint_step: float | None = None,
+        max_joint_speed: float | None = None,
+    ) -> np.ndarray:
+        step_limit = self.cfg.max_joint_step if max_joint_step is None else float(max_joint_step)
+        speed_limit = self.cfg.max_joint_speed if max_joint_speed is None else float(max_joint_speed)
+        max_step = min(step_limit, speed_limit * dt)
         delta = np.clip(target_q - current_q, -max_step, max_step)
         return self.clamp_joints(current_q + delta)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -28,64 +29,86 @@ class LeRobotVrEpisodeWriter:
         self.episode_frame_count = 0
         self.total_saved_episodes = 0
         self.finalized = False
+        self._lock = threading.RLock()
 
     @property
     def is_ready(self) -> bool:
         return self.dataset is not None
 
     def add_frame(self, frame: CollectedFrame) -> None:
-        if self.dataset is None:
-            self._create_dataset(frame)
+        with self._lock:
+            if self.dataset is None:
+                self._create_dataset(frame)
 
-        lerobot_frame = {
-            "observation.images.cam_front": frame.front_rgb,
-            "observation.images.cam_wrist": frame.wrist_rgb,
-            "observation.state": frame.state.astype(np.float32),
-            "action": frame.action.astype(np.float32),
-            "task": self.cfg.task,
-        }
-        self.dataset.add_frame(lerobot_frame)
-        self.episode_frame_count += 1
+            lerobot_frame = {
+                "observation.images.cam_front": frame.front_rgb,
+                "observation.images.cam_wrist": frame.wrist_rgb,
+                "observation.state": frame.state.astype(np.float32),
+                "action": frame.action.astype(np.float32),
+                "task": self.cfg.task,
+            }
+            self.dataset.add_frame(lerobot_frame)
+            self.episode_frame_count += 1
 
     def save_episode(self) -> bool:
-        if self.dataset is None or self.episode_frame_count <= 0:
-            return False
-        try:
-            self.dataset.save_episode(parallel_encoding=False)
-        except TypeError as exc:
-            if "parallel_encoding" not in str(exc):
-                raise
-            self.dataset.save_episode()
-        self.total_saved_episodes += 1
-        self.episode_frame_count = 0
-        return True
+        with self._lock:
+            if self.dataset is None or self.episode_frame_count <= 0:
+                return False
+            self._repair_episode_buffer()
+            try:
+                self.dataset.save_episode(parallel_encoding=False)
+            except TypeError as exc:
+                if "parallel_encoding" not in str(exc):
+                    raise
+                self.dataset.save_episode()
+            self.total_saved_episodes += 1
+            self.episode_frame_count = 0
+            return True
 
     def discard_episode(self) -> bool:
-        if self.dataset is None or self.episode_frame_count <= 0:
-            return False
-        clear_buffer = getattr(self.dataset, "clear_episode_buffer", None)
-        if callable(clear_buffer):
-            clear_buffer()
-        else:
-            episode_buffer = getattr(self.dataset, "episode_buffer", None)
-            if isinstance(episode_buffer, dict):
-                for value in episode_buffer.values():
-                    if hasattr(value, "clear"):
-                        value.clear()
-        self.episode_frame_count = 0
-        return True
+        with self._lock:
+            if self.dataset is None or self.episode_frame_count <= 0:
+                return False
+            clear_buffer = getattr(self.dataset, "clear_episode_buffer", None)
+            if callable(clear_buffer):
+                clear_buffer()
+            else:
+                create_buffer = getattr(self.dataset, "create_episode_buffer", None)
+                if callable(create_buffer):
+                    self.dataset.episode_buffer = create_buffer()
+                else:
+                    episode_buffer = getattr(self.dataset, "episode_buffer", None)
+                    if isinstance(episode_buffer, dict):
+                        episode_buffer.clear()
+            self.episode_frame_count = 0
+            return True
 
     def finalize(self) -> None:
-        if self.dataset is None or self.finalized:
+        with self._lock:
+            if self.dataset is None or self.finalized:
+                return
+            finalize = getattr(self.dataset, "finalize", None)
+            if callable(finalize):
+                finalize()
+            else:
+                consolidate = getattr(self.dataset, "consolidate", None)
+                if callable(consolidate):
+                    consolidate()
+            self.finalized = True
+
+    def _repair_episode_buffer(self) -> None:
+        episode_buffer = getattr(self.dataset, "episode_buffer", None)
+        if not isinstance(episode_buffer, dict):
             return
-        finalize = getattr(self.dataset, "finalize", None)
-        if callable(finalize):
-            finalize()
-        else:
-            consolidate = getattr(self.dataset, "consolidate", None)
-            if callable(consolidate):
-                consolidate()
-        self.finalized = True
+        if "size" in episode_buffer and "task" in episode_buffer:
+            return
+        size = int(self.episode_frame_count)
+        if size <= 0:
+            return
+        if "size" not in episode_buffer:
+            episode_buffer["size"] = size
+        if "task" not in episode_buffer:
+            episode_buffer["task"] = [self.cfg.task] * size
 
     def _create_dataset(self, first_frame: CollectedFrame) -> None:
         front_h, front_w, front_c = first_frame.front_rgb.shape
@@ -100,16 +123,15 @@ class LeRobotVrEpisodeWriter:
             "gripper",
             "RL_mark",
         ]
-        action_names = [
-            "target_tcp_x",
-            "target_tcp_y",
-            "target_tcp_z",
-            "target_tcp_rx",
-            "target_tcp_ry",
-            "target_tcp_rz",
-            "target_gripper",
-            "RL_mark",
-        ]
+        if self.cfg.action_position_mode == "relative":
+            action_pos_names = ["delta_tcp_x", "delta_tcp_y", "delta_tcp_z"]
+        else:
+            action_pos_names = ["target_tcp_x", "target_tcp_y", "target_tcp_z"]
+        if self.cfg.action_orientation_source == "state":
+            action_rot_names = ["tcp_rx", "tcp_ry", "tcp_rz"]
+        else:
+            action_rot_names = ["target_tcp_rx", "target_tcp_ry", "target_tcp_rz"]
+        action_names = action_pos_names + action_rot_names + ["target_gripper", "RL_mark"]
         features = {
             "observation.images.cam_front": {
                 "dtype": "video" if self.cfg.use_videos else "image",
@@ -169,4 +191,3 @@ class LeRobotVrEpisodeWriter:
             if not candidate.exists():
                 return candidate
             suffix += 1
-

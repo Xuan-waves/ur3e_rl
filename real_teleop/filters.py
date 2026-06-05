@@ -15,7 +15,7 @@ class PoseFilter:
         self._quat = None
 
     def __call__(self, pos: np.ndarray, quat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        if self._pos is None:
+        if self._pos is None or self._quat is None:
             self._pos = np.asarray(pos, dtype=float).copy()
             self._quat = _norm_quat(quat)
             return self._pos.copy(), self._quat.copy()
@@ -36,4 +36,3 @@ def _norm_quat(q: np.ndarray) -> np.ndarray:
 def _same_hemi(q: np.ndarray, ref: np.ndarray) -> np.ndarray:
     q = _norm_quat(q)
     return -q if float(np.dot(q, ref)) < 0.0 else q
-

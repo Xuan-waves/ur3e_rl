@@ -1,53 +1,107 @@
 # UR3e VR Impedance LeRobot Data Collection
 
-本目录用于把当前 UR3e VR 阻抗遥操作数据保存成 LeRobot 数据集。采集频率为
-30 Hz，相机通过 ROS topic 读取，collector 不直接打开 RealSense 设备。
+本目录用于采集 UR3e VR 阻抗遥操作数据，并保存为 LeRobot v3 格式数据集。
+collector 只订阅 ROS topic，不直接打开 RealSense 设备；相机节点和预览窗口都
+应作为独立进程运行。
+
+默认任务描述、数据集路径、同步窗口等参数在
+`scripts/collect_data/config.py` 的 `CollectConfig` 中定义，命令行参数会覆盖
+这些默认值。
+
+## 当前默认
+
+- 采集频率: `30 Hz`
+- 同步基准: `front`，即 D455 `/camera/d455/color/image_raw`
+- 图像同步窗口: `0.04 s`
+- state/action/VR 同步窗口: `0.02 s`
+- action 位置: `relative`，即 `target_tcp_pos - state_tcp_pos`
+- action 姿态: `state`，即 action 姿态与当前 state 姿态一致
+- rotvec 分支参考: `TeleopConfig.hardware_home_q` 的 FK 末端姿态
 
 ## 数据格式
 
 - `observation.images.cam_front`: D455 RGB, `/camera/d455/color/image_raw`
 - `observation.images.cam_wrist`: D405 RGB, `/camera/d405/color/image_raw`
 - `observation.state`: `[tcp_x, tcp_y, tcp_z, tcp_rx, tcp_ry, tcp_rz, gripper, RL_mark]`
-- `action`: `[target_tcp_x, target_tcp_y, target_tcp_z, target_tcp_rx, target_tcp_ry, target_tcp_rz, target_gripper, RL_mark]`
+- `action`: `[delta_tcp_x, delta_tcp_y, delta_tcp_z, tcp_rx, tcp_ry, tcp_rz, target_gripper, RL_mark]`
 
-`state` 的 TCP 来自 `/ur3e_vr/robot_state`。`action` 的 TCP 目标来自
-`/ur3e_vr/ik_target`。夹爪目标优先来自 `/ur3e_vr/joint_target`，并保留
-`/ur3e_vr/vr_command` 与 `/ur3e_vr/robot_state` 作为诊断/备用来源。
+默认情况下：
 
-默认数据路径、dataset 名字、task 描述、最大 episode 数等配置在
-`scripts/collect_data/config.py` 的 `CollectConfig` 中定义。命令行参数会覆盖
-这些默认值。
+- `state[0:3]` 来自 `/ur3e_vr/robot_state` 的实际 TCP 位置
+- `state[3:6]` 是实际 TCP 四元数转换得到的连续 rotvec
+- `action[0:3]` 是 `/ur3e_vr/ik_target` 目标位置减去当前 `state[0:3]`
+- `action[3:6]` 直接复制 `state[3:6]`
+- `action[6]` 优先来自 `/ur3e_vr/joint_target` 的夹爪目标，其次使用 VR command 或 robot state
+- `state[7]` 和 `action[7]` 是 `RL_mark`
 
-## 采集流程
+可以切换 action 表达：
+
+```bash
+--action-position-mode relative|absolute
+--action-orientation-source state|ik_target
+```
+
+如果使用 `--action-position-mode absolute`，`action[0:3]` 会变为绝对目标 TCP
+位置，feature names 会写成 `target_tcp_x/y/z`。
+
+## 同步策略
+
+collector 默认以 front/D455 图像为同步基准：
+
+- 相机使用 ROS `Image.header.stamp`
+- robot state、IK target、joint target、VR command 使用 collector 收到消息时的 ROS 时刻
+- 每次基准相机有新帧时，collector 在 `30 Hz` 上限内采样一次
+- 每次采样从 ring buffer 中选取离基准时间最近的数据
+- 超出同步窗口的帧会被丢弃并打印延迟信息
+
+同步基准可切换：
+
+```bash
+--reference-camera front|wrist|timer
+```
+
+一般建议保持默认 `front`，与 `vr_servoj_test` 的 eepose collect/rollout 对齐。
+`timer` 仅用于调试，会退回固定 30 Hz 定时采样。
+
+每个 episode 保存后会写入：
+
+```text
+meta/sync_report_episode_XXXXXX.json
+```
+
+里面包含同步窗口、基准相机、action 表达、rotvec 分支参考和同步统计。训练和
+rollout 应以这个 report 为准，而不是只看当前 `config.py`。
+
+## 启动流程
 
 ### 1. 启动 VR 阻抗遥操作
-
-在第一个终端启动 VR、IK、Robot 三个 tab：
 
 ```bash
 conda activate ur3e_rlt
 scripts/hardware/run_ur3e_vr_tabs.sh \
   --robot-ip 192.168.5.1 \
   --control-mode impedance \
-  --impedance-profile passive
+  --impedance-profile teleop \
+  --no-twin
 ```
 
-确认 VR 可以控制机械臂，A 键可以回 home，右手 trigger 可以控制夹爪。
+`--control-mode` 只有 `impedance` 和 `servoj` 两个选项。`teleop` 是阻抗控制的
+参数 profile，需要通过 `--impedance-profile teleop` 选择；`passive` 更适合
+单独测试手推阻抗手感，不建议作为 VR 数据采集默认参数。
+
+确认 VR 可以控制机械臂，A 键可以 return to home，右手 trigger 可以控制夹爪。
 
 ### 2. 启动 RealSense ROS 相机
-
-在第二个终端单独启动相机 ROS 节点：
 
 ```bash
 conda activate ur3e_rlt
 scripts/collect_data/run_realsense_cameras.sh
 ```
 
-等待两个节点都打印 `RealSense Node Is Up!`。
+等待 D455 和 D405 都打印 `RealSense Node Is Up!`。collector 不负责启动相机，
+也不要同时用其他程序打开相机设备。
 
 ### 3. 检查相机 topic
-
-在第三个终端检查已经启动的相机 topic，不要重复启动相机：
 
 ```bash
 conda activate ur3e_rlt
@@ -59,19 +113,16 @@ python scripts/collect_data/test_realsense_ros.py \
   --duration 10
 ```
 
-期望 D455/D405 都接近 `30 Hz`。
-
-也可以用 ROS 自带命令看频率：
+期望两个 topic 都接近 `30 Hz`：
 
 ```bash
-source /opt/ros/humble/setup.bash
 ros2 topic hz /camera/d455/color/image_raw
 ros2 topic hz /camera/d405/color/image_raw
 ```
 
 ### 4. 检查夹爪数据
 
-按右手食指 trigger，同时运行：
+按右手夹爪 trigger，同时运行：
 
 ```bash
 conda activate ur3e_rlt
@@ -85,28 +136,22 @@ python scripts/collect_data/test_vr_gripper.py --duration 10
 vr_gripper=... joint_gripper=... state_gripper=...
 ```
 
-如果 `joint_gripper` 会跟随 trigger 变化，采集出来的 `action[6]` 应该有夹爪数据。
+如果 `joint_gripper` 会跟随 trigger 变化，采集出的 `action[6]` 应该有夹爪数据。
 
 ### 5. 启动采集窗口
-
-相机和 VR 遥操作都正常后，启动 collector 与 OpenCV 预览：
 
 ```bash
 conda activate ur3e_rlt
 scripts/collect_data/run_collect_data_tabs.sh
 ```
 
-默认会打开：
+默认打开两个窗口：
 
-- `UR3e LeRobot Collector`: 负责保存数据
+- `UR3e LeRobot Collector`: 保存数据
 - `Collection Preview`: 显示 D455/D405 图像
 
-collector tab 会显示一个固定刷新的状态面板，包含按键提示、当前 episode
-帧数、drop 数、同步延迟、topic 状态和夹爪值，不再持续滚动打印周期状态。
-事件日志，例如开始、保存、丢弃或 drop 警告，仍会正常打印。
-
-不要默认使用 `--launch-realsense-ros`。推荐相机始终由
-`run_realsense_cameras.sh` 单独启动，collector 只订阅 topic。
+collector tab 会显示固定刷新的状态面板，包括按键提示、episode 帧数、drop 数、
+同步延迟、topic 状态和夹爪值。开始、保存、丢弃和 drop 警告仍会正常打印。
 
 ## VR 按键
 
@@ -116,26 +161,40 @@ collector tab 会显示一个固定刷新的状态面板，包含按键提示、
 - X: 开始记录当前 episode
 - Y: 切换 `RL_mark`
 - B: 结束并保存当前 episode
-- Left upper trigger 完全按下: 停止记录并丢弃当前 episode，回到等待 X 开始的状态
+- Left upper trigger 完全按下: 停止记录并丢弃当前 episode，回到等待 X 的状态
 - Left lower trigger / grip 完全按下: 结束整个采集程序；如果正在记录，先丢弃当前 episode 再退出
 
-## 常用参数
+## 常用命令
 
-指定数据集名字和任务描述：
+设置数据集名字和任务描述：
 
 ```bash
 scripts/collect_data/run_collect_data_tabs.sh \
-  --dataset-name ur3e_ethernet_insert \
-  --task "Insert the Ethernet connector into the matching slot."
+  --dataset-name ur3e_yellow_duck_bowl \
+  --task "Pick up the yellow toy duck and place it into the grey bowl."
 ```
 
-设置最大采集轮次，保存到指定 episode 数后自动退出：
+限制最大 episode 数：
 
 ```bash
 scripts/collect_data/run_collect_data_tabs.sh --max-episodes 20
 ```
 
-如果 `CollectConfig.max_episodes = 0` 或命令行为 `--max-episodes 0`，表示不限制轮次。
+明确使用默认相对位置 action：
+
+```bash
+scripts/collect_data/run_collect_data_tabs.sh \
+  --action-position-mode relative \
+  --action-orientation-source state
+```
+
+切换到绝对位置 action：
+
+```bash
+scripts/collect_data/run_collect_data_tabs.sh \
+  --action-position-mode absolute \
+  --action-orientation-source state
+```
 
 关闭预览窗口：
 
@@ -143,7 +202,7 @@ scripts/collect_data/run_collect_data_tabs.sh --max-episodes 20
 scripts/collect_data/run_collect_data_tabs.sh --no-preview
 ```
 
-关闭 collector 的固定状态面板，恢复普通日志风格：
+关闭固定状态面板：
 
 ```bash
 scripts/collect_data/run_collect_data_tabs.sh --no-status-panel
@@ -157,8 +216,11 @@ source /opt/ros/humble/setup.bash
 python scripts/collect_data/collect_ur3e_vr_impedance.py \
   --camera-source ros \
   --dataset-root datasets \
-  --dataset-name ur3e_ethernet_insert \
-  --task "Insert the Ethernet connector into the matching slot." \
+  --dataset-name ur3e_yellow_duck_bowl \
+  --task "Pick up the yellow toy duck and place it into the grey bowl." \
+  --reference-camera front \
+  --action-position-mode relative \
+  --action-orientation-source state \
   --max-episodes 20 \
   --no-launch-realsense-ros
 ```
@@ -174,8 +236,6 @@ python scripts/collect_data/preview_collection_topic.py \
 ```
 
 ## 相机诊断
-
-如果相机异常，按层级排查。
 
 只枚举设备，不开流：
 
@@ -210,29 +270,13 @@ python scripts/collect_data/test_realsense_ros.py --mode ros --camera both --cle
 判断方式：
 
 - SDK 单相机失败: 设备、USB、权限或驱动问题
-- SDK 双相机失败: USB 带宽/供电/设备并发问题
+- SDK 双相机失败: USB 带宽、供电或设备并发问题
 - SDK 成功但 ROS 失败: `realsense2_camera` 或 ROS launch 参数问题
 - ROS 成功但采集失败: collector 同步、控制 topic 或写入问题
 
-## 同步策略
+## 注意事项
 
-collector 以固定 30 Hz tick 采样，在每个 tick 上从 ring buffer 中选择最近的：
-
-- front image
-- wrist image
-- robot state
-- IK target
-- joint target
-- VR command
-
-默认最大时间差为：
-
-```bash
---max-dt-front 0.08
---max-dt-wrist 0.08
---max-dt-state 0.08
---max-dt-action 0.08
-```
-
-超过时间窗口的帧会被丢弃并打印延迟信息。这样可以暴露相机或控制 topic
-卡顿，而不是把 stale 数据悄悄写进数据集。
+- 不要让 collector、RealSense SDK 测试程序、`realsense-viewer` 同时打开同一个相机。
+- 新旧数据集的 action 表达可能不同，训练和 rollout 必须按对应数据集的 sync report 解码。
+- 如果 drop 很多，不要先放宽同步窗口；先检查相机频率、robot state 频率和 IK target 是否稳定。
+- 重新采集 impedance 数据后，建议重新训练对应模型，旧模型不会自动适配新 action 表达。

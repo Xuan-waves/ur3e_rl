@@ -119,9 +119,10 @@ def make_robot_state(
     homing: bool,
     target_tracking: bool,
     target_age: float,
+    stamp: float | None = None,
 ) -> list[float]:
     return [
-        now(),
+        now() if stamp is None else float(stamp),
         *as_vec(q, 6).tolist(),
         *as_vec(tcp_pos, 3).tolist(),
         *_norm_quat(tcp_quat).tolist(),

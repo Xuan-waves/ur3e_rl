@@ -10,14 +10,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 @dataclass(frozen=True)
 class CollectConfig:
     fps: float = 30.0
-    max_dt_image: float = 0.08
-    max_dt_front_image: float = 0.08
-    max_dt_wrist_image: float = 0.08
-    max_dt_state: float = 0.08
-    max_dt_action: float = 0.08
+    max_dt_image: float = 0.04
+    max_dt_front_image: float = 0.04
+    max_dt_wrist_image: float = 0.04
+    max_dt_state: float = 0.02
+    max_dt_action: float = 0.02
     allow_stale_front: bool = False
     front_stale_warn_after: float = 2.0
-    buffer_maxlen: int = 600
+    buffer_maxlen: int = 2000
 
     front_image_topic: str = "/camera/d455/color/image_raw"
     wrist_image_topic: str = "/camera/d405/color/image_raw"
@@ -31,7 +31,7 @@ class CollectConfig:
     camera_width: int = 640
     camera_height: int = 480
     camera_fps: int = 30
-    reference_camera: str = "wrist"  # "front" or "wrist"
+    reference_camera: str = "front"  # "front", "wrist", or "timer"
     launch_realsense_ros: bool = False
     cleanup_stale_realsense_ros: bool = False
     camera_startup_wait: float = 3.0
@@ -40,8 +40,12 @@ class CollectConfig:
     dataset_name: str = "ur3e_lerobot_vr_impedance"
     repo_id: str = "local/ur3e_vr_impedance"
     robot_type: str = "ur3e_robotiq"
-    task: str = "Insert the Ethernet connector into the matching slot."
+    # task: str = "Insert the Ethernet connector into the matching slot."
+    task: str = "Pick up the yellow toy duck and place it into the grey bowl."
+
     max_episodes: int = 0  # 0 means unlimited.
+    action_position_mode: str = "relative"  # "relative" stores target_pos - state_pos; "absolute" stores target_pos.
+    action_orientation_source: str = "state"  # "state" aligns action[3:6] with state[3:6]; "ik_target" stores target orientation.
 
     use_videos: bool = True
     image_writer_threads: int = 4

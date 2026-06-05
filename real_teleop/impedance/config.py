@@ -72,17 +72,17 @@ class ImpedanceTestConfig:
     profiles: dict[str, ImpedanceProfile] = field(
         default_factory=lambda: {
             "teleop": ImpedanceProfile(
-                kp=(1500.0, 1500.0, 1500.0),
+                kp=(850.0, 850.0, 950.0),
                 virtual_mass=(0.0, 0.0, 0.0),
                 accel_filter_alpha=0.25,
                 max_accel=(8.0, 8.0, 8.0),
-                kd=(18.0, 18.0, 20.0),
-                force_deadband=(0.5, 0.5, 0.6),
+                kd=(12.0, 12.0, 14.0),
+                force_deadband=(0.35, 0.35, 0.45),
                 max_force=(200.0, 200.0, 200.0),
                 max_position_error=0.60,
                 force_mode_limits=(2.0, 2.0, 2.0, 2.0, 2.0, 2.0),
-                force_mode_damping=0.06,
-                force_mode_gain_scaling=0.85,
+                force_mode_damping=0.04,
+                force_mode_gain_scaling=0.95,
                 enable_orientation=False,
                 rot_kp=(220.0, 220.0, 220.0),
                 rot_kd=(8.0, 8.0, 8.0),

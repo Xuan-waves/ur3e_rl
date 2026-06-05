@@ -11,13 +11,15 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from scipy.spatial.transform import Rotation as R
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from real_teleop.config import TeleopConfig
+from real_teleop.kinematics import RobotKinematics
 from real_teleop.messages import parse_ik_target, parse_joint_target, parse_robot_state, parse_vr_command
+from real_teleop.rotation_repr import continuous_rotvec_from_quat
 from scripts.collect_data.config import CollectConfig
 from scripts.collect_data.lerobot_writer import CollectedFrame, LeRobotVrEpisodeWriter
 
@@ -140,11 +142,15 @@ class Ur3eVrImpedanceCollector:
 
     def __init__(self, node, cfg: CollectConfig) -> None:
         from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+        from rclpy.callback_groups import ReentrantCallbackGroup
         from sensor_msgs.msg import Image
         from std_msgs.msg import Float64MultiArray
 
         self.node = node
         self.cfg = cfg
+        self.sync_reference = str(cfg.reference_camera).strip().lower()
+        if self.sync_reference not in {"front", "wrist", "timer"}:
+            raise ValueError("reference_camera must be 'front', 'wrist', or 'timer'")
         self.writer = LeRobotVrEpisodeWriter(cfg)
         self.recording = False
         self.rl_mark = 0.0
@@ -163,6 +169,10 @@ class Ur3eVrImpedanceCollector:
         self.stats = SyncStats()
         self.last_gripper_status = {"state": 0.0, "action": 0.0, "vr": 0.0, "joint": 0.0}
         self.last_dt_map: dict[str, float | None] = {}
+        self.eepose_rotvec_reference = self._make_eepose_rotvec_reference()
+        self.last_state_rotvec: np.ndarray | None = None
+        self.last_action_rotvec: np.ndarray | None = None
+        self.pending_reference_stamps: deque[float] = deque(maxlen=cfg.buffer_maxlen)
         self.status = ConsoleStatusPanel(enabled=cfg.status_panel, min_period=1.0 / max(cfg.status_hz, 1e-6))
         self.shutdown_requested = False
         self.shutdown_reason = ""
@@ -190,51 +200,75 @@ class Ur3eVrImpedanceCollector:
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
         )
+        self.callback_group = ReentrantCallbackGroup()
 
         self.subs = [
-            node.create_subscription(Image, cfg.front_image_topic, self._on_front_image, image_qos),
-            node.create_subscription(Image, cfg.wrist_image_topic, self._on_wrist_image, image_qos),
-            node.create_subscription(Float64MultiArray, cfg.robot_state_topic, self._on_robot_state, data_qos),
-            node.create_subscription(Float64MultiArray, cfg.ik_target_topic, self._on_ik_target, data_qos),
-            node.create_subscription(Float64MultiArray, cfg.joint_target_topic, self._on_joint_target, data_qos),
-            node.create_subscription(Float64MultiArray, cfg.vr_command_topic, self._on_vr_command, data_qos),
+            node.create_subscription(Image, cfg.front_image_topic, self._on_front_image, image_qos, callback_group=self.callback_group),
+            node.create_subscription(Image, cfg.wrist_image_topic, self._on_wrist_image, image_qos, callback_group=self.callback_group),
+            node.create_subscription(Float64MultiArray, cfg.robot_state_topic, self._on_robot_state, data_qos, callback_group=self.callback_group),
+            node.create_subscription(Float64MultiArray, cfg.ik_target_topic, self._on_ik_target, data_qos, callback_group=self.callback_group),
+            node.create_subscription(Float64MultiArray, cfg.joint_target_topic, self._on_joint_target, data_qos, callback_group=self.callback_group),
+            node.create_subscription(Float64MultiArray, cfg.vr_command_topic, self._on_vr_command, data_qos, callback_group=self.callback_group),
         ]
-        self.collect_timer = node.create_timer(1.0 / max(float(cfg.fps), 1.0), self._collect_tick)
+        timer_period = 1.0 / max(float(cfg.fps), 1.0)
+        timer_callback = self._collect_tick if self.sync_reference == "timer" else self._reference_timer_tick
+        self.collect_timer = node.create_timer(timer_period, timer_callback, callback_group=self.callback_group)
 
         self._log_info(
             "UR3e strict LeRobot collector ready. "
-            f"fps={cfg.fps:.1f}, front={cfg.front_image_topic}, wrist={cfg.wrist_image_topic}, "
+            f"fps={cfg.fps:.1f}, sync_reference={self.sync_reference}, "
+            f"front={cfg.front_image_topic}, wrist={cfg.wrist_image_topic}, "
             f"output_parent={cfg.dataset_root}"
         )
         self._render_status(force=True)
 
     def now_sec(self) -> float:
-        return time.monotonic()
+        return self.node.get_clock().now().nanoseconds * 1e-9
+
+    def _make_eepose_rotvec_reference(self) -> np.ndarray:
+        teleop_cfg = TeleopConfig()
+        _, home_quat = RobotKinematics(teleop_cfg).forward(teleop_cfg.hardware_home_q)
+        return continuous_rotvec_from_quat(home_quat).astype(float)
+
+    def _msg_time_sec(self, msg: Any) -> float:
+        header = getattr(msg, "header", None)
+        stamp = getattr(header, "stamp", None)
+        if stamp is None:
+            return self.now_sec()
+        sec = float(getattr(stamp, "sec", 0.0))
+        nanosec = float(getattr(stamp, "nanosec", 0.0))
+        return sec + nanosec * 1e-9
 
     def _on_front_image(self, msg) -> None:
-        self._push("front", self.now_sec(), msg)
+        stamp = self._msg_time_sec(msg)
+        self._push("front", stamp, msg)
+        if self.sync_reference == "front":
+            self.pending_reference_stamps.append(stamp)
 
     def _on_wrist_image(self, msg) -> None:
-        self._push("wrist", self.now_sec(), msg)
+        stamp = self._msg_time_sec(msg)
+        self._push("wrist", stamp, msg)
+        if self.sync_reference == "wrist":
+            self.pending_reference_stamps.append(stamp)
 
     def _on_robot_state(self, msg) -> None:
         try:
             payload = parse_robot_state(msg.data)
-            self._push("state", float(payload.get("stamp", self.now_sec())), payload)
+            self._push("state", self.now_sec(), payload)
         except Exception as exc:
             self._log_warn(f"Bad robot_state frame: {exc}")
 
     def _on_ik_target(self, msg) -> None:
         try:
             payload = parse_ik_target(msg.data)
-            self._push("action", float(payload.get("stamp", self.now_sec())), payload)
+            self._push("action", self.now_sec(), payload)
         except Exception as exc:
             self._log_warn(f"Bad ik_target frame: {exc}")
 
     def _on_joint_target(self, msg) -> None:
         try:
             payload = parse_joint_target(msg.data)
-            self._push("joint_action", float(payload.get("stamp", self.now_sec())), payload)
+            self._push("joint_action", self.now_sec(), payload)
         except Exception as exc:
             self._log_warn(f"Bad joint_target frame: {exc}")
 
@@ -244,7 +278,7 @@ class Ur3eVrImpedanceCollector:
         except Exception as exc:
             self._log_warn(f"Bad vr_command frame: {exc}")
             return
-        self._push("vr", float(payload.get("stamp", self.now_sec())), payload)
+        self._push("vr", self.now_sec(), payload)
         self._handle_vr_edges(payload)
 
     def _push(self, key: str, stamp: float, value: Any) -> None:
@@ -280,6 +314,7 @@ class Ur3eVrImpedanceCollector:
             return
         self.recording = True
         self._clear_buffers()
+        self._reset_rotation_continuity()
         self.stats.reset(self.now_sec())
         self.last_sample_time = 0.0
         self.last_log_time = self.now_sec()
@@ -289,6 +324,7 @@ class Ur3eVrImpedanceCollector:
 
     def _save_episode(self) -> None:
         self.recording = False
+        self._reset_rotation_continuity()
         try:
             saved = self.writer.save_episode()
         except Exception as exc:
@@ -315,6 +351,7 @@ class Ur3eVrImpedanceCollector:
         self.recording = False
         self.last_sample_time = 0.0
         self._clear_buffers()
+        self._reset_rotation_continuity()
         self.stats.reset(self.now_sec())
 
         if discarded_frames <= 0:
@@ -355,14 +392,27 @@ class Ur3eVrImpedanceCollector:
         for buffer in self.buffers.values():
             buffer.clear()
 
-    def _collect_tick(self) -> None:
+    def _reference_timer_tick(self) -> None:
+        if not self.recording:
+            self._log_waiting_status()
+            self._render_status()
+            return
+        if not self.pending_reference_stamps:
+            self._render_status()
+            return
+        stamp = float(self.pending_reference_stamps[-1])
+        self.pending_reference_stamps.clear()
+        self._collect_tick(stamp)
+
+    def _collect_tick(self, stamp: float | None = None) -> None:
         if not self.recording:
             self._log_waiting_status()
             self._render_status()
             return
 
-        stamp = self.now_sec()
-        min_period = 1.0 / max(float(self.cfg.fps), 1e-6)
+        stamp = self.now_sec() if stamp is None else float(stamp)
+        period_slack = 0.8 if self.sync_reference != "timer" else 1.0
+        min_period = period_slack / max(float(self.cfg.fps), 1e-6)
         if stamp - self.last_sample_time < min_period:
             return
         self.last_sample_time = stamp
@@ -382,7 +432,7 @@ class Ur3eVrImpedanceCollector:
         try:
             action_gripper = self._select_gripper(joint_target, vr_command, robot_state)
             state_vec = self._make_state(robot_state, fallback_gripper=action_gripper)
-            action_vec = self._make_action(ik_target, action_gripper)
+            action_vec = self._make_action(ik_target, action_gripper, state_vec)
             frame = CollectedFrame(
                 front_rgb=self._image_to_rgb(front_msg),
                 wrist_rgb=self._image_to_rgb(wrist_msg),
@@ -544,17 +594,45 @@ class Ur3eVrImpedanceCollector:
     def _make_state(self, robot_state: dict[str, Any], *, fallback_gripper: np.float32) -> np.ndarray:
         pos = np.asarray(robot_state["tcp_pos"], dtype=np.float32)
         quat = np.asarray(robot_state["tcp_quat"], dtype=float)
-        rotvec = R.from_quat(quat).as_rotvec().astype(np.float32)
+        previous_rotvec = self.last_state_rotvec
+        if previous_rotvec is None:
+            previous_rotvec = self.eepose_rotvec_reference
+        rotvec = continuous_rotvec_from_quat(quat, previous_rotvec)
+        self.last_state_rotvec = rotvec.astype(float)
         gripper = np.float32(np.clip(robot_state.get("gripper", 0.0), 0.0, self.cfg.gripper_max))
         if gripper <= 1e-4 and fallback_gripper > 1e-4:
             gripper = fallback_gripper
         return np.concatenate([pos, rotvec, [gripper, np.float32(self.rl_mark)]]).astype(np.float32)
 
-    def _make_action(self, ik_target: dict[str, Any], gripper: np.float32) -> np.ndarray:
-        pos = np.asarray(ik_target["pos"], dtype=np.float32)
-        quat = np.asarray(ik_target["quat"], dtype=float)
-        rotvec = R.from_quat(quat).as_rotvec().astype(np.float32)
+    def _make_action(self, ik_target: dict[str, Any], gripper: np.float32, state_vec: np.ndarray) -> np.ndarray:
+        target_pos = np.asarray(ik_target["pos"], dtype=np.float32)
+        state_pos = np.asarray(state_vec[:3], dtype=np.float32)
+        if self.cfg.action_position_mode == "relative":
+            pos = target_pos - state_pos
+        elif self.cfg.action_position_mode == "absolute":
+            pos = target_pos
+        else:
+            raise ValueError(f"Unsupported action_position_mode: {self.cfg.action_position_mode!r}")
+
+        if self.cfg.action_orientation_source == "state":
+            rotvec = np.asarray(state_vec[3:6], dtype=np.float32)
+            self.last_action_rotvec = rotvec.astype(float)
+        elif self.cfg.action_orientation_source == "ik_target":
+            quat = np.asarray(ik_target["quat"], dtype=float)
+            previous_rotvec = self.last_action_rotvec
+            if previous_rotvec is None and self.last_state_rotvec is not None:
+                previous_rotvec = self.last_state_rotvec
+            if previous_rotvec is None:
+                previous_rotvec = self.eepose_rotvec_reference
+            rotvec = continuous_rotvec_from_quat(quat, previous_rotvec)
+            self.last_action_rotvec = rotvec.astype(float)
+        else:
+            raise ValueError(f"Unsupported action_orientation_source: {self.cfg.action_orientation_source!r}")
         return np.concatenate([pos, rotvec, [gripper, np.float32(self.rl_mark)]]).astype(np.float32)
+
+    def _reset_rotation_continuity(self) -> None:
+        self.last_state_rotvec = self.eepose_rotvec_reference.copy()
+        self.last_action_rotvec = self.eepose_rotvec_reference.copy()
 
     def _image_to_rgb(self, msg) -> np.ndarray:
         image = self._decode_image(msg)
@@ -610,12 +688,31 @@ class Ur3eVrImpedanceCollector:
                 "vr_command": self.cfg.vr_command_topic,
             },
             "sync_policy": {
-                "clock": "time.monotonic receive-time for images; embedded monotonic stamps for robot/VR topics",
+                "clock": "image header.stamp when available; receive-time for state/action/VR topics",
+                "sync_reference": self.sync_reference,
                 "max_dt_front_image": self.cfg.max_dt_front_image,
                 "max_dt_wrist_image": self.cfg.max_dt_wrist_image,
                 "max_dt_state": self.cfg.max_dt_state,
                 "max_dt_action": self.cfg.max_dt_action,
                 "strict": True,
+            },
+            "action_representation": {
+                "position": self.cfg.action_position_mode,
+                "position_relative_to": "observation.state[0:3]"
+                if self.cfg.action_position_mode == "relative"
+                else None,
+                "orientation": self.cfg.action_orientation_source,
+                "rotvec_reference_policy": "hardware_home_fk",
+                "eepose_rotvec_reference": self.eepose_rotvec_reference.tolist(),
+            },
+            "representation": {
+                "control_mode": "impedance",
+                "state_mode": "eepose",
+                "action_mode": "eepose",
+                "ee_action_position_mode": self.cfg.action_position_mode,
+                "action_orientation_source": self.cfg.action_orientation_source,
+                "rotvec_reference_policy": "hardware_home_fk",
+                "eepose_rotvec_reference": self.eepose_rotvec_reference.tolist(),
             },
         }
         report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -639,6 +736,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repo-id", default=CollectConfig.repo_id)
     parser.add_argument("--task", default=CollectConfig.task)
     parser.add_argument("--max-episodes", type=int, default=CollectConfig.max_episodes)
+    parser.add_argument(
+        "--action-position-mode",
+        choices=("relative", "absolute"),
+        default=CollectConfig.action_position_mode,
+        help="Store action position as target-state delta or absolute target TCP position.",
+    )
+    parser.add_argument(
+        "--action-orientation-source",
+        choices=("state", "ik_target"),
+        default=CollectConfig.action_orientation_source,
+        help="Store action orientation from current robot state or IK target.",
+    )
     parser.add_argument("--fps", type=float, default=CollectConfig.fps)
     parser.add_argument("--front-image-topic", default=CollectConfig.front_image_topic)
     parser.add_argument("--wrist-image-topic", default=CollectConfig.wrist_image_topic)
@@ -656,7 +765,7 @@ def parse_args() -> argparse.Namespace:
 
     # Deprecated compatibility options accepted by run_collect_data_tabs.sh.
     parser.add_argument("--camera-source", choices=("ros", "realsense"), default="ros")
-    parser.add_argument("--reference-camera", choices=("front", "wrist"), default=CollectConfig.reference_camera)
+    parser.add_argument("--reference-camera", choices=("front", "wrist", "timer"), default=CollectConfig.reference_camera)
     parser.add_argument("--camera-width", type=int, default=CollectConfig.camera_width)
     parser.add_argument("--camera-height", type=int, default=CollectConfig.camera_height)
     parser.add_argument("--camera-fps", type=int, default=CollectConfig.camera_fps)
@@ -696,11 +805,14 @@ def make_config(args: argparse.Namespace) -> CollectConfig:
         ik_target_topic=str(args.ik_target_topic),
         joint_target_topic=str(args.joint_target_topic),
         vr_command_topic=str(args.vr_command_topic),
+        reference_camera=str(args.reference_camera),
         dataset_root=Path(args.dataset_root).expanduser().resolve(),
         dataset_name=str(args.dataset_name),
         repo_id=str(args.repo_id),
         task=str(args.task),
         max_episodes=max(0, int(args.max_episodes)),
+        action_position_mode=str(args.action_position_mode),
+        action_orientation_source=str(args.action_orientation_source),
         use_videos=not bool(args.no_videos),
         resize=tuple(args.resize) if args.resize else None,
         status_panel=bool(args.status_panel),
@@ -719,7 +831,7 @@ def main() -> int:
     rclpy.init()
     node = rclpy.create_node("ur3e_vr_impedance_lerobot_collector")
     collector = Ur3eVrImpedanceCollector(node, cfg)
-    executor = MultiThreadedExecutor(num_threads=2)
+    executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)
     try:
         while rclpy.ok() and not collector.shutdown_requested:
