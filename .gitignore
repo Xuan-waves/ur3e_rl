@@ -9,3 +9,8 @@ gitpass
 outputs/
 
 .cache/
+.claude/
+.codex/
+.vscode/
+.agents/
+
