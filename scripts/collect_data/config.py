@@ -40,12 +40,11 @@ class CollectConfig:
     dataset_name: str = "ur3e_lerobot_vr_impedance"
     repo_id: str = "local/ur3e_vr_impedance"
     robot_type: str = "ur3e_robotiq"
-    # task: str = "Insert the Ethernet connector into the matching slot."
-    task: str = "Pick up the yellow toy duck and place it into the grey bowl."
+    task: str = "Pick up the Ethernet plug and insert it into the port on the black module."
+    # task: str = "Pick up the yellow toy duck and place it into the grey bowl."
 
     max_episodes: int = 0  # 0 means unlimited.
     action_position_mode: str = "relative"  # "relative" stores target_pos - state_pos; "absolute" stores target_pos.
-    action_orientation_source: str = "state"  # "state" aligns action[3:6] with state[3:6]; "ik_target" stores target orientation.
 
     use_videos: bool = True
     image_writer_threads: int = 4
@@ -59,10 +58,10 @@ class CollectConfig:
     gripper_max: float = 0.93
     status_panel: bool = True
     status_hz: float = 4.0
+    save_confirm_release_sec: float = 0.35
 
     x_key_name: str = "X"
     y_key_name: str = "Y"
     b_key_name: str = "B"
     a_key_name: str = "A"
     cancel_left_trigger_threshold: float = 0.95
-    stop_left_grip_threshold: float = 0.95

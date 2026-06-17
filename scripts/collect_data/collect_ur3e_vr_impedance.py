@@ -16,10 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from real_teleop.config import TeleopConfig
-from real_teleop.kinematics import RobotKinematics
 from real_teleop.messages import parse_ik_target, parse_joint_target, parse_robot_state, parse_vr_command
-from real_teleop.rotation_repr import continuous_rotvec_from_quat
 from scripts.collect_data.config import CollectConfig
 from scripts.collect_data.lerobot_writer import CollectedFrame, LeRobotVrEpisodeWriter
 
@@ -153,12 +150,11 @@ class Ur3eVrImpedanceCollector:
             raise ValueError("reference_camera must be 'front', 'wrist', or 'timer'")
         self.writer = LeRobotVrEpisodeWriter(cfg)
         self.recording = False
-        self.rl_mark = 0.0
+        self.pending_save = False
         self.total_frames = 0
         self.last_buttons = {
             "record_start": False,
             "record_stop": False,
-            "rl_toggle": False,
             "cancel_record": False,
             "stop_collection": False,
         }
@@ -166,12 +162,10 @@ class Ur3eVrImpedanceCollector:
         self.last_drop_log_time = 0.0
         self.last_wait_log_time = 0.0
         self.last_sample_time = 0.0
+        self.b_released_since = self.now_sec()
         self.stats = SyncStats()
         self.last_gripper_status = {"state": 0.0, "action": 0.0, "vr": 0.0, "joint": 0.0}
         self.last_dt_map: dict[str, float | None] = {}
-        self.eepose_rotvec_reference = self._make_eepose_rotvec_reference()
-        self.last_state_rotvec: np.ndarray | None = None
-        self.last_action_rotvec: np.ndarray | None = None
         self.pending_reference_stamps: deque[float] = deque(maxlen=cfg.buffer_maxlen)
         self.status = ConsoleStatusPanel(enabled=cfg.status_panel, min_period=1.0 / max(cfg.status_hz, 1e-6))
         self.shutdown_requested = False
@@ -224,11 +218,6 @@ class Ur3eVrImpedanceCollector:
 
     def now_sec(self) -> float:
         return self.node.get_clock().now().nanoseconds * 1e-9
-
-    def _make_eepose_rotvec_reference(self) -> np.ndarray:
-        teleop_cfg = TeleopConfig()
-        _, home_quat = RobotKinematics(teleop_cfg).forward(teleop_cfg.hardware_home_q)
-        return continuous_rotvec_from_quat(home_quat).astype(float)
 
     def _msg_time_sec(self, msg: Any) -> float:
         header = getattr(msg, "header", None)
@@ -287,44 +276,92 @@ class Ur3eVrImpedanceCollector:
         self.topic_last[key] = self.now_sec()
 
     def _handle_vr_edges(self, payload: dict[str, Any]) -> None:
+        stamp = self.now_sec()
         current = {
             "record_start": bool(payload.get("record_start", False)),
             "record_stop": bool(payload.get("record_stop", False)),
-            "rl_toggle": bool(payload.get("rl_toggle", False)),
             "cancel_record": bool(payload.get("cancel_record", False)),
-            "stop_collection": bool(payload.get("stop_collection", False))
-            or float(payload.get("left_grip", 0.0)) >= self.cfg.stop_left_grip_threshold,
+            # In the shared VR message schema, stop_collection is still produced
+            # by left_grip for older collectors. This impedance collector remaps
+            # left_grip away from shutdown, so shutdown is intentionally Y-only here.
+            "stop_collection": bool(payload.get("rl_toggle", False)),
         }
+        if not current["record_stop"] and self.b_released_since <= 0.0:
+            self.b_released_since = stamp
         if current["record_start"] and not self.last_buttons["record_start"]:
             self._start_recording()
-        if current["rl_toggle"] and not self.last_buttons["rl_toggle"]:
-            self.rl_mark = 0.0 if self.rl_mark > 0.5 else 1.0
-            self.status.set_event(f"RL_mark toggled to {int(self.rl_mark)}")
-            self._log_info(f"RL_mark toggled to {int(self.rl_mark)}")
         if current["record_stop"] and not self.last_buttons["record_stop"]:
-            self._save_episode()
+            self._handle_save_button(stamp)
         if current["cancel_record"] and not self.last_buttons["cancel_record"]:
             self._discard_episode()
         if current["stop_collection"] and not self.last_buttons["stop_collection"]:
             self._stop_collection_from_vr()
+        if current["record_stop"]:
+            self.b_released_since = 0.0
         self.last_buttons = current
 
     def _start_recording(self) -> None:
         if self.recording:
             return
+        if self.pending_save and self.writer.episode_frame_count > 0:
+            frames = self.writer.episode_frame_count
+            self.status.set_event(f"pending episode frames={frames}; B=save, left trigger=discard")
+            self._log_warn(f"Pending episode has {frames} frames. Press B again to save or left trigger to discard.")
+            self._render_status(force=True)
+            return
         self.recording = True
+        self.pending_save = False
         self._clear_buffers()
-        self._reset_rotation_continuity()
         self.stats.reset(self.now_sec())
         self.last_sample_time = 0.0
         self.last_log_time = self.now_sec()
-        self.status.set_event(f"recording started, RL_mark={int(self.rl_mark)}")
-        self._log_info(f"Recording started. RL_mark={int(self.rl_mark)}")
+        self.status.set_event("recording started")
+        self._log_info("Recording started.")
+        self._render_status(force=True)
+
+    def _handle_save_button(self, stamp: float) -> None:
+        if self.pending_save:
+            released_for = stamp - self.b_released_since if self.b_released_since > 0.0 else 0.0
+            if released_for < self.cfg.save_confirm_release_sec:
+                frames = self.writer.episode_frame_count
+                self.status.set_event(f"release B, then press again to save frames={frames}")
+                self._log_warn(
+                    f"Ignoring B confirm until B is released for {self.cfg.save_confirm_release_sec:.2f}s. "
+                    f"pending_frames={frames}"
+                )
+                self._render_status(force=True)
+                return
+            self._save_episode()
+            return
+        if self.recording or self.writer.episode_frame_count > 0:
+            self._stage_episode_for_save()
+            return
+        self.status.set_event("B pressed, no frames to stage")
+        self._log_warn("B pressed, but current episode has no frames.")
+        self._render_status(force=True)
+
+    def _stage_episode_for_save(self) -> None:
+        frames = self.writer.episode_frame_count
+        self.recording = False
+        self.last_sample_time = 0.0
+        self._clear_buffers()
+        if frames <= 0:
+            self.pending_save = False
+            self.status.set_event("B pressed, no frames to stage")
+            self._log_warn("B pressed, but current episode has no frames.")
+            self._render_status(force=True)
+            return
+        self.pending_save = True
+        self.b_released_since = 0.0
+        self.status.set_event(f"episode staged: frames={frames}; press B again to save")
+        self._log_info(
+            f"Episode staged in memory: frames={frames}. Release B, then press B again to save; "
+            "or press left trigger to discard."
+        )
         self._render_status(force=True)
 
     def _save_episode(self) -> None:
         self.recording = False
-        self._reset_rotation_continuity()
         try:
             saved = self.writer.save_episode()
         except Exception as exc:
@@ -332,9 +369,11 @@ class Ur3eVrImpedanceCollector:
             self._log_error(f"Failed to save episode: {exc}")
             return
         if not saved:
+            self.pending_save = False
             self.status.set_event("B pressed, no frames to save")
             self._log_warn("B pressed, but current episode has no frames.")
             return
+        self.pending_save = False
         report_path = self._write_sync_report()
         self.status.set_event(f"episode saved, total={self.writer.total_saved_episodes}")
         self._log_info(
@@ -347,15 +386,16 @@ class Ur3eVrImpedanceCollector:
 
     def _discard_episode(self) -> None:
         was_recording = self.recording
+        was_pending = self.pending_save
         discarded_frames = self.writer.episode_frame_count
         self.recording = False
+        self.pending_save = False
         self.last_sample_time = 0.0
         self._clear_buffers()
-        self._reset_rotation_continuity()
         self.stats.reset(self.now_sec())
 
         if discarded_frames <= 0:
-            if not was_recording:
+            if not was_recording and not was_pending:
                 return
             self.status.set_event("recording stopped, no frames discarded")
             self._log_warn("Recording stopped by left trigger. No frames were recorded.")
@@ -375,11 +415,11 @@ class Ur3eVrImpedanceCollector:
         self._render_status(force=True)
 
     def _stop_collection_from_vr(self) -> None:
-        if self.recording or self.writer.episode_frame_count > 0:
+        if self.recording or self.pending_save or self.writer.episode_frame_count > 0:
             self._discard_episode()
-            reason = "left lower trigger pressed; current episode discarded"
+            reason = "Y pressed; current episode discarded"
         else:
-            reason = "left lower trigger pressed"
+            reason = "Y pressed"
         self._request_shutdown(reason)
 
     def _request_shutdown(self, reason: str) -> None:
@@ -451,8 +491,8 @@ class Ur3eVrImpedanceCollector:
         self.total_frames += 1
         self.stats.success(stamp, dt_map)
         self.last_gripper_status = {
-            "state": float(state_vec[6]),
-            "action": float(action_vec[6]),
+            "state": float(state_vec[3]),
+            "action": float(action_vec[3]),
             "vr": float(vr_command.get("gripper", 0.0)),
             "joint": float(joint_target.get("gripper", 0.0)),
         }
@@ -499,9 +539,14 @@ class Ur3eVrImpedanceCollector:
         return " ".join(parts)
 
     def _render_status(self, *, force: bool = False) -> None:
-        mode = "RECORDING" if self.recording else "WAITING"
+        if self.recording:
+            mode = "RECORDING"
+        elif self.pending_save:
+            mode = "STAGED"
+        else:
+            mode = "WAITING"
         duration = max(self.stats.ended_at - self.stats.started_at, 0.0)
-        fps = self.stats.frames_saved / max(duration, 1e-9) if self.recording else 0.0
+        fps = self.stats.frames_saved / max(duration, 1e-9) if self.recording or self.pending_save else 0.0
         required_keys = ("front", "wrist", "state", "action", "vr")
         missing = [key for key in required_keys if self.topic_counts.get(key, 0) <= 0]
         missing_text = "ok" if not missing else ",".join(missing)
@@ -510,11 +555,11 @@ class Ur3eVrImpedanceCollector:
         topic_text = self._compact_topic_status()
         grip = self.last_gripper_status
         lines = [
-            "UR3e LeRobot Collector | X=start  Y=RL_mark  B=save  left_trigger=discard  left_grip=quit",
+            "UR3e LeRobot Collector | X=start  B=stage/save  Y=discard+quit  left_trigger=discard",
             (
                 f"mode={mode:<9} episode_frames={self.writer.episode_frame_count:<5d} "
                 f"total={self.total_frames:<5d} saved_eps={self.writer.total_saved_episodes}/{max_eps:<3} "
-                f"fps={fps:>5.1f} drops={self.stats.frames_dropped:<4d} RL_mark={int(self.rl_mark)}"
+                f"fps={fps:>5.1f} drops={self.stats.frames_dropped:<4d}"
             ),
             (
                 f"gripper state={grip['state']:.3f} action={grip['action']:.3f} "
@@ -593,16 +638,10 @@ class Ur3eVrImpedanceCollector:
 
     def _make_state(self, robot_state: dict[str, Any], *, fallback_gripper: np.float32) -> np.ndarray:
         pos = np.asarray(robot_state["tcp_pos"], dtype=np.float32)
-        quat = np.asarray(robot_state["tcp_quat"], dtype=float)
-        previous_rotvec = self.last_state_rotvec
-        if previous_rotvec is None:
-            previous_rotvec = self.eepose_rotvec_reference
-        rotvec = continuous_rotvec_from_quat(quat, previous_rotvec)
-        self.last_state_rotvec = rotvec.astype(float)
         gripper = np.float32(np.clip(robot_state.get("gripper", 0.0), 0.0, self.cfg.gripper_max))
         if gripper <= 1e-4 and fallback_gripper > 1e-4:
             gripper = fallback_gripper
-        return np.concatenate([pos, rotvec, [gripper, np.float32(self.rl_mark)]]).astype(np.float32)
+        return np.concatenate([pos, [gripper]]).astype(np.float32)
 
     def _make_action(self, ik_target: dict[str, Any], gripper: np.float32, state_vec: np.ndarray) -> np.ndarray:
         target_pos = np.asarray(ik_target["pos"], dtype=np.float32)
@@ -614,25 +653,7 @@ class Ur3eVrImpedanceCollector:
         else:
             raise ValueError(f"Unsupported action_position_mode: {self.cfg.action_position_mode!r}")
 
-        if self.cfg.action_orientation_source == "state":
-            rotvec = np.asarray(state_vec[3:6], dtype=np.float32)
-            self.last_action_rotvec = rotvec.astype(float)
-        elif self.cfg.action_orientation_source == "ik_target":
-            quat = np.asarray(ik_target["quat"], dtype=float)
-            previous_rotvec = self.last_action_rotvec
-            if previous_rotvec is None and self.last_state_rotvec is not None:
-                previous_rotvec = self.last_state_rotvec
-            if previous_rotvec is None:
-                previous_rotvec = self.eepose_rotvec_reference
-            rotvec = continuous_rotvec_from_quat(quat, previous_rotvec)
-            self.last_action_rotvec = rotvec.astype(float)
-        else:
-            raise ValueError(f"Unsupported action_orientation_source: {self.cfg.action_orientation_source!r}")
-        return np.concatenate([pos, rotvec, [gripper, np.float32(self.rl_mark)]]).astype(np.float32)
-
-    def _reset_rotation_continuity(self) -> None:
-        self.last_state_rotvec = self.eepose_rotvec_reference.copy()
-        self.last_action_rotvec = self.eepose_rotvec_reference.copy()
+        return np.concatenate([pos, [gripper]]).astype(np.float32)
 
     def _image_to_rgb(self, msg) -> np.ndarray:
         image = self._decode_image(msg)
@@ -677,7 +698,6 @@ class Ur3eVrImpedanceCollector:
         report = {
             "task": self.cfg.task,
             "fps": self.cfg.fps,
-            "rl_mark_final": int(self.rl_mark),
             "stats": self.stats.as_dict(),
             "topics": {
                 "front": self.cfg.front_image_topic,
@@ -701,18 +721,13 @@ class Ur3eVrImpedanceCollector:
                 "position_relative_to": "observation.state[0:3]"
                 if self.cfg.action_position_mode == "relative"
                 else None,
-                "orientation": self.cfg.action_orientation_source,
-                "rotvec_reference_policy": "hardware_home_fk",
-                "eepose_rotvec_reference": self.eepose_rotvec_reference.tolist(),
+                "orientation": "removed_fixed_orientation",
             },
             "representation": {
                 "control_mode": "impedance",
-                "state_mode": "eepose",
-                "action_mode": "eepose",
+                "state_mode": "tcp_position_gripper",
+                "action_mode": "tcp_position_gripper",
                 "ee_action_position_mode": self.cfg.action_position_mode,
-                "action_orientation_source": self.cfg.action_orientation_source,
-                "rotvec_reference_policy": "hardware_home_fk",
-                "eepose_rotvec_reference": self.eepose_rotvec_reference.tolist(),
             },
         }
         report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -723,7 +738,7 @@ class Ur3eVrImpedanceCollector:
         return " ".join(f"{key}={'none' if value is None else f'{value * 1000.0:.1f}ms'}" for key, value in dt_map.items())
 
     def close(self) -> None:
-        if self.recording:
+        if self.recording or self.pending_save:
             self.node.get_logger().warn("Collector closing while recording; unsaved current episode is discarded.")
             self._discard_episode()
         self.writer.finalize()
@@ -745,8 +760,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--action-orientation-source",
         choices=("state", "ik_target"),
-        default=CollectConfig.action_orientation_source,
-        help="Store action orientation from current robot state or IK target.",
+        default=None,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument("--fps", type=float, default=CollectConfig.fps)
     parser.add_argument("--front-image-topic", default=CollectConfig.front_image_topic)
@@ -779,7 +794,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--status-panel", dest="status_panel", action="store_true", default=CollectConfig.status_panel)
     parser.add_argument("--no-status-panel", dest="status_panel", action="store_false")
     parser.add_argument("--status-hz", type=float, default=CollectConfig.status_hz)
-    parser.add_argument("--stop-left-grip-threshold", type=float, default=CollectConfig.stop_left_grip_threshold)
+    parser.add_argument("--stop-left-grip-threshold", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--launch-realsense-ros", dest="launch_realsense_ros", action="store_true", default=False)
     parser.add_argument("--no-launch-realsense-ros", dest="launch_realsense_ros", action="store_false")
     parser.add_argument("--allow-stale-front", action="store_true", default=False)
@@ -812,12 +827,10 @@ def make_config(args: argparse.Namespace) -> CollectConfig:
         task=str(args.task),
         max_episodes=max(0, int(args.max_episodes)),
         action_position_mode=str(args.action_position_mode),
-        action_orientation_source=str(args.action_orientation_source),
         use_videos=not bool(args.no_videos),
         resize=tuple(args.resize) if args.resize else None,
         status_panel=bool(args.status_panel),
         status_hz=float(args.status_hz),
-        stop_left_grip_threshold=float(args.stop_left_grip_threshold),
     )
 
 

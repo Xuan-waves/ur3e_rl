@@ -13,6 +13,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from scipy.spatial.transform import Rotation as R
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -21,7 +22,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from real_teleop.config import TeleopConfig
 from real_teleop.kinematics import RobotKinematics
-from real_teleop.messages import make_ik_target, make_vr_command, parse_robot_state
+from real_teleop.messages import make_ik_target, make_vr_command, parse_robot_state, parse_vr_command
 from real_teleop.rotation_repr import continuous_rotvec_from_quat
 from real_teleop.safety import SafetyLimiter
 from scripts.rollout_smolvla_no_rotvec.config import CFG
@@ -45,16 +46,49 @@ def home_orientation() -> tuple[np.ndarray, np.ndarray]:
     return quat, continuous_rotvec_from_quat(quat).astype(float)
 
 
+def radial_deadzone(vec: np.ndarray, radius: float) -> np.ndarray:
+    norm = float(np.linalg.norm(vec))
+    if norm <= float(radius):
+        return np.zeros_like(vec)
+    return vec * ((norm - float(radius)) / max(norm, 1e-9))
+
+
 def robot_state_to_no_rotvec_tensor(
     robot_state: dict[str, Any],
     *,
     rl_mark: float,
     gripper_max: float,
+    state_dim: int,
 ) -> torch.Tensor:
+    if state_dim < 4:
+        raise ValueError(f"no-rotvec state_dim must be at least 4, got {state_dim}")
     pos = np.asarray(robot_state["tcp_pos"], dtype=np.float32).reshape(3)
     gripper = np.float32(np.clip(robot_state.get("gripper", 0.0), 0.0, gripper_max))
-    state = np.concatenate([pos, [gripper, np.float32(rl_mark)]]).astype(np.float32)
+    state = np.concatenate([pos, [gripper]]).astype(np.float32)
+    if state_dim >= 5:
+        state = np.concatenate([state, [np.float32(rl_mark)]]).astype(np.float32)
+    if state.size < state_dim:
+        state = np.pad(state, (0, state_dim - state.size), mode="constant")
+    elif state.size > state_dim:
+        state = state[:state_dim]
     return torch.from_numpy(state)
+
+
+def read_policy_feature_dims(policy_path: Path) -> tuple[int, int]:
+    config_path = policy_path / "config.json"
+    if not config_path.exists():
+        raise FileNotFoundError(f"Missing policy config.json: {config_path}")
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    try:
+        state_shape = config["input_features"]["observation.state"]["shape"]
+        action_shape = config["output_features"]["action"]["shape"]
+        state_dim = int(state_shape[0])
+        action_dim = int(action_shape[0])
+    except Exception as exc:
+        raise ValueError(f"Could not read state/action dims from {config_path}") from exc
+    if state_dim < 4 or action_dim < 4:
+        raise ValueError(f"Expected no-rotvec state/action dims >=4, got state={state_dim}, action={action_dim}")
+    return state_dim, action_dim
 
 
 def infer_no_rotvec_position_mode(policy_path: Path) -> tuple[str | None, str | None]:
@@ -118,6 +152,7 @@ class NoRotvecSmolVLARTCRollout:
         self.args = args
         self.execute = bool(args.execute)
         self.policy_path = resolve_policy_path(args.policy_path)
+        self.policy_state_dim, self.policy_action_dim = read_policy_feature_dims(self.policy_path)
         if args.action_position_mode == "auto":
             inferred_mode, inferred_source = infer_no_rotvec_position_mode(self.policy_path)
             args.action_position_mode = inferred_mode or "absolute"
@@ -138,6 +173,14 @@ class NoRotvecSmolVLARTCRollout:
         self.last_action_step_time = 0.0
         self.last_log_time = 0.0
         self.last_dt_map: dict[str, float | None] = {}
+        self.vr_command: dict[str, Any] | None = None
+        self.vr_recv_mono = 0.0
+        self.vr_override_active = False
+        self.vr_anchor_ctrl_pos: np.ndarray | None = None
+        self.vr_anchor_tcp_pos: np.ndarray | None = None
+        self.vr_anchor_gripper = 0.0
+        self.vr_anchor_trigger = 0.0
+        self.model_resume_block_until = 0.0
 
         self.pending_reference_stamps: queue.SimpleQueue[float] = queue.SimpleQueue()
         self.topic_counts = {"front": 0, "wrist": 0, "state": 0}
@@ -192,6 +235,16 @@ class NoRotvecSmolVLARTCRollout:
                 callback_group=self.callback_group,
             ),
         ]
+        if args.vr_override:
+            self.subs.append(
+                node.create_subscription(
+                    Float64MultiArray,
+                    args.vr_raw_topic,
+                    self._on_raw_vr,
+                    data_qos,
+                    callback_group=self.callback_group,
+                )
+            )
         self.observe_timer = node.create_timer(1.0 / max(args.fps, 1.0), self._observe_tick, callback_group=self.callback_group)
         self.publish_timer = node.create_timer(
             1.0 / max(args.command_hz, 1.0),
@@ -206,11 +259,13 @@ class NoRotvecSmolVLARTCRollout:
         mode = "EXECUTE" if self.execute else "DRY-RUN"
         node.get_logger().info(
             f"UR3e no-rotvec SmolVLA RTC rollout ready ({mode}). policy={self.policy_path}, "
-            f"task={args.task!r}, state/action=5D no-rotvec, action_position_mode={args.action_position_mode}, "
+            f"task={args.task!r}, state_dim={self.policy_state_dim}, action_dim={self.policy_action_dim}, "
+            f"action_position_mode={args.action_position_mode}, "
             f"action_mode_source={args.action_position_mode_source}, fps={args.fps:.1f}, "
             f"command_hz={args.command_hz:.1f}, action_step_hz={args.action_step_hz:.1f}, "
             f"sync_reference={self.sync_reference}, chunk={self.runner.chunk_size}, "
-            f"rtc_horizon={self.runner.execution_horizon}, fixed_home_rotvec={fmt_vec(self.fixed_rotvec)}"
+            f"rtc_horizon={self.runner.execution_horizon}, fixed_home_rotvec={fmt_vec(self.fixed_rotvec)}, "
+            f"vr_override={args.vr_override} raw_topic={args.vr_raw_topic}"
         )
 
     def close(self) -> None:
@@ -257,6 +312,13 @@ class NoRotvecSmolVLARTCRollout:
         except Exception as exc:
             self.node.get_logger().warn(f"Bad robot_state: {exc}")
 
+    def _on_raw_vr(self, msg) -> None:
+        try:
+            self.vr_command = parse_vr_command(msg.data)
+            self.vr_recv_mono = time.monotonic()
+        except Exception as exc:
+            self.node.get_logger().warn(f"Bad raw VR command: {exc}")
+
     def _take_reference_stamp(self) -> float | None:
         if self.sync_reference == "timer":
             return self.now_sec()
@@ -293,6 +355,7 @@ class NoRotvecSmolVLARTCRollout:
                     state,
                     rl_mark=self.args.rl_mark,
                     gripper_max=self.args.gripper_max,
+                    state_dim=self.policy_state_dim,
                 ),
                 "task": self.args.task,
             }
@@ -305,21 +368,13 @@ class NoRotvecSmolVLARTCRollout:
         from std_msgs.msg import Float64MultiArray
 
         stamp = self.now_sec()
-        if stamp - self.last_action_step_time >= 1.0 / max(self.args.action_step_hz, 1e-6):
+        model_allowed = stamp >= self.model_resume_block_until
+        if model_allowed and stamp - self.last_action_step_time >= 1.0 / max(self.args.action_step_hz, 1e-6):
             action = self.runner.get_action()
             if action is not None:
                 self.current_action = action
                 self.current_ready_stamp = stamp
                 self.last_action_step_time = stamp
-
-        if self.current_action is None:
-            self._log_wait(f"RTC queue warming up {self._format_status()} {self._format_rtc_status()}")
-            return
-
-        action = np.asarray(self.current_action, dtype=np.float32).reshape(-1)
-        if action.size < 5:
-            self.node.get_logger().warn(f"Bad no-rotvec action shape: {action.shape}")
-            return
 
         state, state_age = self.buffers["state"].latest(now=stamp)
         if state is None or state_age is None or state_age > self.args.max_dt_state:
@@ -327,7 +382,23 @@ class NoRotvecSmolVLARTCRollout:
             return
 
         current_pos = np.asarray(state["tcp_pos"], dtype=float).reshape(3)
-        target_pos, gripper = self._decode_and_smooth_action(action, current_pos=current_pos)
+        current_gripper = float(np.clip(state.get("gripper", 0.0), 0.0, self.args.gripper_max))
+        override = self._vr_override_target(current_pos=current_pos, current_gripper=current_gripper)
+        source = "model"
+        if override is not None:
+            target_pos, gripper = override
+            source = "vr_override"
+        else:
+            if self.current_action is None:
+                self._log_wait(f"RTC queue warming up {self._format_status()} {self._format_rtc_status()}")
+                return
+            action = np.asarray(self.current_action, dtype=np.float32).reshape(-1)
+            if action.size < 4 or action.size < self.policy_action_dim:
+                self.node.get_logger().warn(
+                    f"Bad no-rotvec action shape: {action.shape}, expected at least {self.policy_action_dim}"
+                )
+                return
+            target_pos, gripper = self._decode_and_smooth_action(action, current_pos=current_pos)
         if self.execute:
             pose_msg = Float64MultiArray()
             pose_msg.data = make_ik_target(target_pos, self.fixed_quat)
@@ -339,10 +410,107 @@ class NoRotvecSmolVLARTCRollout:
 
         prefix = "publish" if self.execute else "dry-run"
         self._log_info(
-            f"{prefix} pos={fmt_vec(target_pos)} fixed_rot={fmt_vec(self.fixed_rotvec)} "
+            f"{prefix} source={source} pos={fmt_vec(target_pos)} fixed_rot={fmt_vec(self.fixed_rotvec)} "
             f"gripper={gripper:.3f} age={(stamp - self.current_ready_stamp) * 1000.0:.0f}ms "
             f"{self._format_rtc_status()}"
         )
+
+    def _vr_override_target(
+        self,
+        *,
+        current_pos: np.ndarray,
+        current_gripper: float,
+    ) -> tuple[np.ndarray, float] | None:
+        if not self.args.vr_override or self.vr_command is None:
+            self._release_vr_override(current_pos)
+            return None
+        if time.monotonic() - self.vr_recv_mono > self.args.vr_override_stale_s:
+            self._release_vr_override(current_pos)
+            return None
+
+        pose = self.vr_command.get("pose")
+        enabled = bool(self.vr_command.get("enable", False))
+        if not enabled or pose is None:
+            self._release_vr_override(current_pos)
+            return None
+
+        ctrl_pose = np.asarray(pose, dtype=float).reshape(7)
+        ctrl_pos = self._vr_control_pos(ctrl_pose[:3], ctrl_pose[3:])
+        raw_gripper = float(np.clip(self.vr_command.get("gripper", 0.0), 0.0, self.args.gripper_max))
+
+        if not self.vr_override_active:
+            self.vr_override_active = True
+            self.vr_anchor_ctrl_pos = ctrl_pos.copy()
+            self.vr_anchor_tcp_pos = np.asarray(current_pos, dtype=float).reshape(3).copy()
+            self.vr_anchor_gripper = float(np.clip(current_gripper, 0.0, self.args.gripper_max))
+            self.vr_anchor_trigger = raw_gripper
+            self.last_published_pos = self.vr_anchor_tcp_pos.copy()
+            self.last_published_gripper = self.vr_anchor_gripper
+            self.current_action = None
+            self._drain_runner_queue()
+            self.node.get_logger().info("VR override engaged; anchored controller to current TCP.")
+
+        sign = np.asarray(self.teleop_cfg.vr_control_position_sign, dtype=float)
+        if sign.shape != (3,):
+            sign = np.ones(3, dtype=float)
+        dpos = (ctrl_pos - self.vr_anchor_ctrl_pos) * sign * float(self.teleop_cfg.scale)
+        dpos = radial_deadzone(dpos, float(self.teleop_cfg.dead_zone_pos))
+        pos = self.vr_anchor_tcp_pos + dpos
+        pos = self.safety.clamp_impedance_workspace(pos)
+        min_action_z = float(self.args.min_action_z)
+        if np.isfinite(min_action_z):
+            pos[2] = max(float(pos[2]), min_action_z)
+        pos = self._smooth_position(pos)
+
+        gripper = self.vr_anchor_gripper + (raw_gripper - self.vr_anchor_trigger) * float(self.args.vr_override_gripper_gain)
+        gripper = float(np.clip(gripper, 0.0, self.args.gripper_max))
+        if self.last_published_gripper is not None:
+            alpha_g = float(np.clip(self.args.action_gripper_filter_alpha, 0.0, 1.0))
+            gripper = alpha_g * gripper + (1.0 - alpha_g) * self.last_published_gripper
+        self.last_published_gripper = gripper
+        self.current_ready_stamp = self.now_sec()
+        return pos.astype(np.float32), gripper
+
+    def _release_vr_override(self, current_pos: np.ndarray) -> None:
+        if not self.vr_override_active:
+            return
+        self.vr_override_active = False
+        self.vr_anchor_ctrl_pos = None
+        self.vr_anchor_tcp_pos = None
+        self.last_published_pos = np.asarray(current_pos, dtype=float).reshape(3).copy()
+        self.current_action = None
+        self._drain_runner_queue()
+        self.model_resume_block_until = self.now_sec() + float(self.args.vr_override_resume_delay_s)
+        self.node.get_logger().info("VR override released; model queue drained and rollout re-anchored to current TCP.")
+
+    def _drain_runner_queue(self) -> None:
+        for _ in range(max(1, int(self.runner.chunk_size) * 2)):
+            if self.runner.get_action() is None:
+                break
+
+    def _vr_control_pos(self, ctrl_pos: np.ndarray, ctrl_quat: np.ndarray) -> np.ndarray:
+        pos = np.asarray(ctrl_pos, dtype=float).reshape(3)
+        offset = np.asarray(self.teleop_cfg.vr_controller_pivot_offset_m, dtype=float)
+        if offset.shape != (3,) or float(np.linalg.norm(offset)) < 1e-9:
+            return pos.copy()
+        quat = np.asarray(ctrl_quat, dtype=float).reshape(4)
+        norm = float(np.linalg.norm(quat))
+        if norm < 1e-9:
+            return pos.copy()
+        return pos + R.from_quat(quat / norm).apply(offset)
+
+    def _smooth_position(self, pos: np.ndarray) -> np.ndarray:
+        pos = np.asarray(pos, dtype=float).reshape(3)
+        if self.last_published_pos is not None:
+            alpha = float(np.clip(self.args.action_pose_filter_alpha, 0.0, 1.0))
+            pos = alpha * pos + (1.0 - alpha) * self.last_published_pos
+            delta = pos - self.last_published_pos
+            norm = float(np.linalg.norm(delta))
+            max_step = float(max(self.args.max_action_pos_step, 1e-6))
+            if norm > max_step:
+                pos = self.last_published_pos + delta / norm * max_step
+        self.last_published_pos = pos.copy()
+        return pos
 
     def _decode_and_smooth_action(self, action: np.ndarray, *, current_pos: np.ndarray) -> tuple[np.ndarray, float]:
         raw_pos = np.asarray(action[:3], dtype=float).reshape(3)
@@ -358,15 +526,7 @@ class NoRotvecSmolVLARTCRollout:
             pos[2] = max(float(pos[2]), min_action_z)
         gripper = float(np.clip(action[3], 0.0, self.args.gripper_max))
 
-        if self.last_published_pos is not None:
-            alpha = float(np.clip(self.args.action_pose_filter_alpha, 0.0, 1.0))
-            pos = alpha * pos + (1.0 - alpha) * self.last_published_pos
-            delta = pos - self.last_published_pos
-            norm = float(np.linalg.norm(delta))
-            max_step = float(max(self.args.max_action_pos_step, 1e-6))
-            if norm > max_step:
-                pos = self.last_published_pos + delta / norm * max_step
-        self.last_published_pos = pos.copy()
+        pos = self._smooth_position(pos)
 
         if self.last_published_gripper is not None:
             alpha_g = float(np.clip(self.args.action_gripper_filter_alpha, 0.0, 1.0))
@@ -450,6 +610,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--robot-state-topic", default=CFG.robot_state_topic)
     parser.add_argument("--ik-target-topic", default=CFG.ik_target_topic)
     parser.add_argument("--vr-command-topic", default=CFG.vr_command_topic)
+    parser.add_argument("--vr-raw-topic", default=CFG.vr_raw_topic)
     parser.add_argument("--fps", type=float, default=CFG.fps)
     parser.add_argument("--command-hz", type=float, default=CFG.command_hz)
     parser.add_argument("--action-step-hz", type=float, default=CFG.action_step_hz)
@@ -484,6 +645,10 @@ def parse_args() -> argparse.Namespace:
         default=CFG.min_action_z,
         help="Runtime lower bound for target TCP z in meters. Use nan to disable.",
     )
+    parser.add_argument("--vr-override", action=argparse.BooleanOptionalAction, default=CFG.vr_override)
+    parser.add_argument("--vr-override-stale-s", type=float, default=CFG.vr_override_stale_s)
+    parser.add_argument("--vr-override-resume-delay-s", type=float, default=CFG.vr_override_resume_delay_s)
+    parser.add_argument("--vr-override-gripper-gain", type=float, default=CFG.vr_override_gripper_gain)
     parser.add_argument("--action-gripper-filter-alpha", type=float, default=CFG.action_gripper_filter_alpha)
     parser.add_argument("--log-hz", type=float, default=CFG.log_hz)
     parser.add_argument("--preview", action=argparse.BooleanOptionalAction, default=CFG.preview)

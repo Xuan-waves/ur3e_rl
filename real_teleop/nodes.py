@@ -38,15 +38,16 @@ from .vr import XrobotVrReader
 
 
 class VrNode:
-    def __init__(self, rclpy_node, cfg: TeleopConfig):
+    def __init__(self, rclpy_node, cfg: TeleopConfig, *, output_topic: str = TOPIC_VR_COMMAND):
         from std_msgs.msg import Float64MultiArray
 
         self.node = rclpy_node
         self.cfg = cfg
         self.reader = XrobotVrReader(cfg)
-        self.pub = self.node.create_publisher(Float64MultiArray, TOPIC_VR_COMMAND, latest_qos())
+        self.output_topic = output_topic
+        self.pub = self.node.create_publisher(Float64MultiArray, output_topic, latest_qos())
         self.timer = self.node.create_timer(1.0 / cfg.vr_hz, self._tick)
-        self.node.get_logger().info(f"VR node publishing typed commands at {cfg.vr_hz:.0f} Hz")
+        self.node.get_logger().info(f"VR node publishing typed commands to {output_topic} at {cfg.vr_hz:.0f} Hz")
 
     def _tick(self) -> None:
         from std_msgs.msg import Float64MultiArray
@@ -188,7 +189,7 @@ class IkNode:
             self.hold_tcp_pos = None
             self.hold_tcp_quat = None
         elif latch_hold and (was_tracking or self.hold_tcp_pos is None):
-            self._latch_hold_from_state()
+            self._latch_hold_pose()
         self.anchor_ctrl_pos = None
         self.anchor_ctrl_quat = None
         self.anchor_tcp_pos = None
@@ -198,6 +199,13 @@ class IkNode:
         self.last_q_target = None
         self.ctrl_filter.reset()
         self.target_filter.reset()
+
+    def _latch_hold_pose(self) -> bool:
+        if self.cfg.impedance_hold_last_target_on_lost and self.last_target_pos is not None and self.last_target_quat is not None:
+            self.hold_tcp_pos = self.last_target_pos.copy()
+            self.hold_tcp_quat = _norm_quat(self.last_target_quat)
+            return True
+        return self._latch_hold_from_state()
 
     def _latch_hold_from_state(self) -> bool:
         if self.state is None:
@@ -293,15 +301,26 @@ class IkNode:
     ) -> None:
         self.anchor_ctrl_pos = self._translation_control_pos(ctrl_pos, ctrl_quat)
         self.anchor_ctrl_quat = _norm_quat(ctrl_quat)
-        self.anchor_tcp_pos = tcp_pos.copy()
-        self.anchor_tcp_quat = _norm_quat(tcp_quat)
+        anchor_tcp_pos = tcp_pos.copy()
+        anchor_tcp_quat = _norm_quat(tcp_quat)
+        if (
+            self.use_impedance_target
+            and self.cfg.impedance_reanchor_from_last_target
+            and self.hold_tcp_pos is not None
+            and self.hold_tcp_quat is not None
+            and float(np.linalg.norm(anchor_tcp_pos - self.hold_tcp_pos)) <= self.cfg.impedance_reanchor_max_error_m
+        ):
+            anchor_tcp_pos = self.hold_tcp_pos.copy()
+            anchor_tcp_quat = _norm_quat(self.hold_tcp_quat)
+        self.anchor_tcp_pos = anchor_tcp_pos
+        self.anchor_tcp_quat = anchor_tcp_quat
         self.ctrl_filter.reset()
         self.target_filter.reset()
         self.last_target_pos = None
         self.last_target_quat = None
         self.last_q_target = None
-        self.hold_tcp_pos = tcp_pos.copy()
-        self.hold_tcp_quat = _norm_quat(tcp_quat)
+        self.hold_tcp_pos = anchor_tcp_pos.copy()
+        self.hold_tcp_quat = _norm_quat(anchor_tcp_quat)
 
     def _impedance_target_from_controller(
         self,
@@ -583,6 +602,7 @@ class RobotNode:
         self.last_gripper = -1.0
         self.last_gripper_send = 0.0
         self.last_home = False
+        self.last_impedance_reset = False
         self.homing = False
         self.home_thread: Optional[threading.Thread] = None
 
@@ -791,6 +811,10 @@ class RobotNode:
             self.node.get_logger().warn(f"Bad robot command: {exc}")
             return
         self.desired_gripper = float(np.clip(payload.get("gripper", self.desired_gripper), 0.0, 1.0))
+        reset_impedance = bool(payload.get("reset_impedance", False))
+        if reset_impedance and not self.last_impedance_reset:
+            self._reset_impedance_runtime("command")
+        self.last_impedance_reset = reset_impedance
         home = bool(payload.get("home", False))
         if home and not self.last_home:
             self._start_home()
@@ -832,6 +856,7 @@ class RobotNode:
                 self._set_actual_state(actual_q, stamp=actual_stamp)
             if self.control_mode == "impedance":
                 self.impedance_home_rotvec = self._read_actual_tcp_rotvec()
+                self._reset_impedance_runtime("home_done")
         except Exception as exc:
             self.node.get_logger().error(f"Home move failed: {exc}")
         finally:
@@ -1060,6 +1085,26 @@ class RobotNode:
         if not self.dry_run and self.impedance_motion is not None:
             self.impedance_motion.stop()
         self.servo_active = False
+
+    def _reset_impedance_runtime(self, reason: str) -> None:
+        if self.control_mode != "impedance":
+            return
+        self.target_tracking = False
+        self.target_reason = f"impedance_reset:{reason}"
+        self.target_tcp_pos = None
+        self.target_tcp_quat = None
+        self.target_pose_stamp = 0.0
+        self.target_stamp = 0.0
+        self.soft_hold_active = False
+        self.servo_active = False
+        self.impedance_configured = False
+        self.impedance_target_filter.reset()
+        if self.impedance_motion is not None:
+            try:
+                self.impedance_motion.reset_runtime_state(stop_force_mode=True, reconfigure=False)
+            except Exception as exc:
+                self.node.get_logger().warn(f"Impedance runtime reset failed: {exc}")
+        self.node.get_logger().info(f"Impedance runtime reset: {reason}")
 
     def _apply_gripper(self) -> None:
         if now() - self.last_gripper_send < 0.04:

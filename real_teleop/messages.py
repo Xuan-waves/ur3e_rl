@@ -67,6 +67,7 @@ def make_vr_command(payload: dict[str, Any]) -> list[float]:
         float(np.clip(payload.get("left_trigger", 0.0), 0.0, 1.0)),
         1.0 if bool(payload.get("stop_collection", False)) else 0.0,
         float(np.clip(payload.get("left_grip", 0.0), 0.0, 1.0)),
+        1.0 if bool(payload.get("reset_impedance", False)) else 0.0,
     ]
 
 
@@ -92,6 +93,7 @@ def parse_vr_command(data: Any) -> dict[str, Any]:
                 "left_trigger": float(np.clip(arr[16], 0.0, 1.0)),
                 "stop_collection": bool(arr[17] > 0.5) if arr.size >= 18 else False,
                 "left_grip": float(np.clip(arr[18], 0.0, 1.0)) if arr.size >= 19 else 0.0,
+                "reset_impedance": bool(arr[19] > 0.5) if arr.size >= 20 else False,
             }
         )
     else:
@@ -104,6 +106,7 @@ def parse_vr_command(data: Any) -> dict[str, Any]:
                 "left_trigger": 0.0,
                 "stop_collection": False,
                 "left_grip": 0.0,
+                "reset_impedance": False,
             }
         )
     return payload

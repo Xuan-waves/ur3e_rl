@@ -117,21 +117,13 @@ class LeRobotVrEpisodeWriter:
             "tcp_x",
             "tcp_y",
             "tcp_z",
-            "tcp_rx",
-            "tcp_ry",
-            "tcp_rz",
             "gripper",
-            "RL_mark",
         ]
         if self.cfg.action_position_mode == "relative":
             action_pos_names = ["delta_tcp_x", "delta_tcp_y", "delta_tcp_z"]
         else:
             action_pos_names = ["target_tcp_x", "target_tcp_y", "target_tcp_z"]
-        if self.cfg.action_orientation_source == "state":
-            action_rot_names = ["tcp_rx", "tcp_ry", "tcp_rz"]
-        else:
-            action_rot_names = ["target_tcp_rx", "target_tcp_ry", "target_tcp_rz"]
-        action_names = action_pos_names + action_rot_names + ["target_gripper", "RL_mark"]
+        action_names = action_pos_names + ["target_gripper"]
         features = {
             "observation.images.cam_front": {
                 "dtype": "video" if self.cfg.use_videos else "image",
@@ -145,12 +137,12 @@ class LeRobotVrEpisodeWriter:
             },
             "observation.state": {
                 "dtype": "float32",
-                "shape": (8,),
+                "shape": (4,),
                 "names": {"motors": state_names},
             },
             "action": {
                 "dtype": "float32",
-                "shape": (8,),
+                "shape": (4,),
                 "names": {"motors": action_names},
             },
         }

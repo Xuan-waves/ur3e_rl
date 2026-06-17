@@ -11,7 +11,15 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 @dataclass(frozen=True)
 class NoRotvecSmolVLARTCRolloutConfig:
-    policy_path: Path = REPO_ROOT / "outputs" / "train" / "ur3e_smolvla_060520" / "checkpoints" / "020000"
+    policy_path: Path = (
+        REPO_ROOT
+        / "outputs"
+        / "rlt_vla"
+        / "ur3e_smolvla_0610"
+        / "checkpoints"
+        / "050000"
+        / "pretrained_model"
+    )
     task: str = CollectConfig.task
 
     front_image_topic: str = CollectConfig.front_image_topic
@@ -19,10 +27,11 @@ class NoRotvecSmolVLARTCRolloutConfig:
     robot_state_topic: str = CollectConfig.robot_state_topic
     ik_target_topic: str = CollectConfig.ik_target_topic
     vr_command_topic: str = CollectConfig.vr_command_topic
+    vr_raw_topic: str = "/ur3e_vr/vr_command_raw"
 
     fps: float = CollectConfig.fps
     command_hz: float = CollectConfig.fps
-    action_step_hz: float = 15.0
+    action_step_hz: float = 30.0
 
     rtc_execution_horizon: int = 10
     rtc_max_guidance_weight: float = 10.0
@@ -47,7 +56,11 @@ class NoRotvecSmolVLARTCRolloutConfig:
     action_pose_filter_alpha: float = 0.35
     action_gripper_filter_alpha: float = 0.50
     max_action_pos_step: float = 0.035
-    min_action_z: float = 0.08
+    min_action_z: float = 0.01
+    vr_override: bool = True
+    vr_override_stale_s: float = 0.20
+    vr_override_resume_delay_s: float = 0.30
+    vr_override_gripper_gain: float = 1.0
 
     return_home_on_start: bool = True
     start_home_delay_s: float = 1.0

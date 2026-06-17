@@ -67,6 +67,9 @@ class TeleopConfig:
     stale_command_s: float = 0.50
     stale_target_s: float = 0.30
     impedance_soft_hold_on_lost: bool = True
+    impedance_hold_last_target_on_lost: bool = True
+    impedance_reanchor_from_last_target: bool = True
+    impedance_reanchor_max_error_m: float = 0.10
     target_pos_hold_epsilon: float = 0.0012
     target_rot_hold_epsilon: float = 0.004
     ik_joint_deadband: float = 0.00015
@@ -86,7 +89,7 @@ class TeleopConfig:
         default_factory=lambda: np.array([1.35, 1.15, 1.35], dtype=float)
     )
     impedance_workspace_min: np.ndarray = field(
-        default_factory=lambda: np.array([-0.15, -0.65, 0.01], dtype=float)
+        default_factory=lambda: np.array([-0.15, -0.65, 0.02], dtype=float)
     )
     impedance_workspace_max: np.ndarray = field(
         default_factory=lambda: np.array([0.45, 0.10, 0.45], dtype=float)

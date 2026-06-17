@@ -72,6 +72,12 @@ class CartesianImpedanceCore:
     def reset_ramp(self) -> None:
         self._started_at = time.monotonic()
 
+    def reset_runtime_state(self) -> None:
+        self._last_time = None
+        self._last_speed = None
+        self._acceleration[:] = 0.0
+        self.reset_ramp()
+
     def compute(self, state: CartesianState) -> ImpedanceCommand:
         pos = _vec(state.position, 3, "state.position")
         rotvec = _vec(state.rotation_vector, 3, "state.rotation_vector")
@@ -217,6 +223,13 @@ class RtdeImpedanceMotion:
             time.sleep(0.1)
         self.robot.set_force_mode_damping(self.profile.force_mode_damping)
         self.robot.set_force_mode_gain_scaling(self.profile.force_mode_gain_scaling)
+
+    def reset_runtime_state(self, *, stop_force_mode: bool = True, reconfigure: bool = False) -> None:
+        if stop_force_mode:
+            self.stop()
+        self.core.reset_runtime_state()
+        if reconfigure:
+            self.configure_force_mode()
 
     def read_state(self) -> CartesianState:
         if self.kinematics is None:

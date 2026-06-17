@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from real_teleop.config import TeleopConfig
+from real_teleop.config import TOPIC_VR_COMMAND, TeleopConfig
 from real_teleop.nodes import IkNode, RobotNode, VrNode
 
 
@@ -35,6 +35,8 @@ def _node_command(args, node_name: str) -> list[str]:
         cmd.append("--dry-run")
     if args.no_twin and node_name == "ik":
         cmd.append("--no-twin")
+    if node_name == "vr" and args.vr_output_topic != TOPIC_VR_COMMAND:
+        cmd += ["--vr-output-topic", args.vr_output_topic]
     return cmd
 
 
@@ -145,6 +147,14 @@ def main() -> int:
     )
     parser.add_argument("--dry-run", action="store_true", help="Do not connect to the UR controller.")
     parser.add_argument("--no-twin", action="store_true", help="Do not start the MuJoCo twin viewer inside the IK node.")
+    parser.add_argument(
+        "--vr-output-topic",
+        default=TOPIC_VR_COMMAND,
+        help=(
+            "Topic used by the VR node. Keep the default for normal teleop. "
+            "For rollout/RLT intervention, publish VR to a raw topic such as /ur3e_vr/vr_command_raw."
+        ),
+    )
     parser.add_argument("--split-tabs", action="store_true", help="Launch vr/ik/robot in separate terminal tabs.")
     parser.add_argument(
         "--split-launcher",
@@ -173,7 +183,7 @@ def main() -> int:
     try:
         if args.node in ("all", "vr"):
             node = rclpy.create_node("ur3e_vr_input")
-            resources.append(VrNode(node, cfg))
+            resources.append(VrNode(node, cfg, output_topic=args.vr_output_topic))
             ros_nodes.append(node)
         if args.node in ("all", "ik", "twin"):
             node = rclpy.create_node("ur3e_mink_ik")
