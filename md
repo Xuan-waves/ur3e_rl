@@ -1,4 +1,0 @@
-@~/vr_ur/xrobotoolkit_ur/scripts，这里是参考工程里面包含数据采集的部分，现在我希望根据我们现在的VR阻抗控制写一个收集数据的脚本。
-数据包含：
-两个相机的RGB信息，机械臂末端6Dof信息，以及一个掩码。
-信息以lerobot格式保存，其中observeration 包含了两个相机的RGB，state，state为机械臂六维末端位姿和夹爪开和角度和掩码，action为VR指向的六维末端位姿和夹爪开和角度和掩码。
