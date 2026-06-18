@@ -2,6 +2,9 @@
 
 This collector records camera frames for a small binary classifier:
 
+For the full UR3e RLT workflow and rollout/training commands, start from
+`scripts/rlt_train/README.md`.
+
 - `ready_gate=1`: the Ethernet plug is in the start holder/fixture and the next rollout can begin.
 - `ready_gate=0`: the scene is not ready, for example the plug is missing, already inserted, held by the gripper, dropped, or badly posed.
 

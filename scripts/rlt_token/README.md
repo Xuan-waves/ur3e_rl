@@ -2,6 +2,9 @@
 
 This folder implements the first stage of the RLT-style pipeline for our UR3e SmolVLA model.
 
+For the full UR3e RLT workflow and rollout/training commands, start from
+`scripts/rlt_train/README.md`.
+
 The goal of Stage 1 is not to control the robot yet. The goal is to teach a small network to compress what the frozen VLA knows into a compact vector:
 
 ```text

@@ -3,6 +3,9 @@
 This tool creates frame-level `rlt_phase` labels for training an RL/RLT gate model.
 It does not modify the original LeRobot `data/*.parquet` files.
 
+For the full UR3e RLT workflow and rollout/training commands, start from
+`scripts/rlt_train/README.md`.
+
 ## Input
 
 Default input is the per-episode video export:
