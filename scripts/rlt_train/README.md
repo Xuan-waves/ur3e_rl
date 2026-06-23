@@ -390,6 +390,19 @@ This is useful for debugging, but not usually useful for learning.
 --rlt-bc-weight
   Strength of behavior-cloning regularization on intervention samples.
 
+--rlt-fusion-mode direct|projected
+  Actor/critic input fusion mode. `direct` keeps the original path:
+  concat([z_rl, state, ref_action]) followed by one LayerNorm+MLP. This is the
+  default and remains compatible with existing Stage2 checkpoints.
+  `projected` first maps each stream through its own LayerNorm+Linear before
+  concatenation. This gives z_rl, robot state, and action chunks comparable
+  hidden feature sizes, but requires training a fresh Stage2 actor/critic or a
+  checkpoint trained with the same fusion mode.
+
+--rlt-fusion-dim
+  Per-stream projection width used only by `--rlt-fusion-mode projected`.
+  Default 128.
+
 --gate-hold-frames
   Hysteresis frame count for RL gate enter/exit.
 

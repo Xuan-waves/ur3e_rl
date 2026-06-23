@@ -58,6 +58,8 @@ class HILSERLStage2Runner(RLTInterventionCollector):
             action_chunk_steps=int(args.rlt_action_chunk_steps),
             actor_hidden_dim=int(args.rlt_actor_hidden_dim),
             critic_hidden_dim=int(args.rlt_critic_hidden_dim),
+            fusion_mode=str(args.rlt_fusion_mode),
+            fusion_dim=int(args.rlt_fusion_dim),
             action_delta_scale_xyz=float(args.rlt_action_delta_scale_xyz),
             actor_lr=float(args.rlt_actor_lr),
             critic_lr=float(args.rlt_critic_lr),
@@ -119,6 +121,7 @@ class HILSERLStage2Runner(RLTInterventionCollector):
             f"actor={args.rlt_enable_actor}, warmup={args.rlt_warmup_steps}, "
             f"min_actor_updates={args.rlt_min_actor_updates}, startup_updates={args.rlt_startup_updates}, "
             f"batch={args.rlt_batch_size}, demo_ratio={args.rlt_replay_demo_ratio:.2f}, "
+            f"fusion={args.rlt_fusion_mode}/{args.rlt_fusion_dim}, "
             f"train_action_dim={args.rlt_train_action_dim}, chunk_steps={args.rlt_action_chunk_steps}, "
             f"delta_xyz={args.rlt_action_delta_scale_xyz:.3f}"
         )

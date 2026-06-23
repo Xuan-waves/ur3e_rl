@@ -1088,6 +1088,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rlt-target-noise-clip-xyz", type=float, default=CFG.rlt_target_noise_clip_xyz)
     parser.add_argument("--rlt-actor-hidden-dim", type=int, default=CFG.rlt_actor_hidden_dim)
     parser.add_argument("--rlt-critic-hidden-dim", type=int, default=CFG.rlt_critic_hidden_dim)
+    parser.add_argument("--rlt-fusion-mode", choices=("direct", "projected"), default=CFG.rlt_fusion_mode)
+    parser.add_argument("--rlt-fusion-dim", type=int, default=CFG.rlt_fusion_dim)
     parser.add_argument("--rlt-train-action-dim", type=int, choices=(3,), default=CFG.rlt_train_action_dim)
     parser.add_argument("--rlt-action-chunk-steps", type=int, default=CFG.rlt_action_chunk_steps)
     parser.add_argument("--rlt-action-delta-scale-xyz", type=float, default=CFG.rlt_action_delta_scale_xyz)

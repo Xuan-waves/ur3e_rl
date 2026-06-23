@@ -103,6 +103,10 @@ class RLTInterventionCollectConfig:
     rlt_target_noise_clip_xyz: float = 0.006
     rlt_actor_hidden_dim: int = 256
     rlt_critic_hidden_dim: int = 256
+    # "direct" keeps the original concat([z_rl, state, ref_action]) path.
+    # "projected" first maps each input stream through its own LayerNorm+Linear.
+    rlt_fusion_mode: str = "direct"
+    rlt_fusion_dim: int = 128
     rlt_train_action_dim: int = 3
     rlt_action_chunk_steps: int = 10
     rlt_action_delta_scale_xyz: float = 0.004

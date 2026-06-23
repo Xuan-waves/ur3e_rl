@@ -118,8 +118,30 @@ class ReplayBuffer:
 class RLTActor(nn.Module):
     """Residual actor: final_action_chunk = ref_action_chunk + tanh(delta) * action_scale."""
 
-    def __init__(self, input_dim: int, action_dim: int, hidden_dim: int, action_scale: np.ndarray) -> None:
+    def __init__(
+        self,
+        z_dim: int,
+        state_dim: int,
+        ref_action_dim: int,
+        action_dim: int,
+        hidden_dim: int,
+        action_scale: np.ndarray,
+        *,
+        fusion_mode: str = "direct",
+        fusion_dim: int = 128,
+    ) -> None:
         super().__init__()
+        self.fusion_mode = str(fusion_mode)
+        if self.fusion_mode not in {"direct", "projected"}:
+            raise ValueError(f"Unsupported RLT actor fusion_mode: {fusion_mode!r}")
+        if self.fusion_mode == "projected":
+            fusion_dim = int(fusion_dim)
+            self.z_proj = nn.Sequential(nn.LayerNorm(z_dim), nn.Linear(z_dim, fusion_dim), nn.ReLU())
+            self.state_proj = nn.Sequential(nn.LayerNorm(state_dim), nn.Linear(state_dim, fusion_dim), nn.ReLU())
+            self.ref_proj = nn.Sequential(nn.LayerNorm(ref_action_dim), nn.Linear(ref_action_dim, fusion_dim), nn.ReLU())
+            input_dim = fusion_dim * 3
+        else:
+            input_dim = z_dim + state_dim + ref_action_dim
         self.net = nn.Sequential(
             nn.LayerNorm(input_dim),
             nn.Linear(input_dim, hidden_dim),
@@ -131,14 +153,39 @@ class RLTActor(nn.Module):
         self.register_buffer("action_scale", torch.as_tensor(action_scale, dtype=torch.float32).reshape(1, action_dim))
 
     def forward(self, z_rl: torch.Tensor, state: torch.Tensor, ref_action: torch.Tensor) -> torch.Tensor:
-        x = torch.cat([z_rl, state, ref_action], dim=-1)
+        if self.fusion_mode == "projected":
+            x = torch.cat([self.z_proj(z_rl), self.state_proj(state), self.ref_proj(ref_action)], dim=-1)
+        else:
+            x = torch.cat([z_rl, state, ref_action], dim=-1)
         delta = torch.tanh(self.net(x)) * self.action_scale
         return ref_action + delta
 
 
 class TwinQCritic(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int) -> None:
+    def __init__(
+        self,
+        z_dim: int,
+        state_dim: int,
+        ref_action_dim: int,
+        action_dim: int,
+        hidden_dim: int,
+        *,
+        fusion_mode: str = "direct",
+        fusion_dim: int = 128,
+    ) -> None:
         super().__init__()
+        self.fusion_mode = str(fusion_mode)
+        if self.fusion_mode not in {"direct", "projected"}:
+            raise ValueError(f"Unsupported RLT critic fusion_mode: {fusion_mode!r}")
+        if self.fusion_mode == "projected":
+            fusion_dim = int(fusion_dim)
+            self.z_proj = nn.Sequential(nn.LayerNorm(z_dim), nn.Linear(z_dim, fusion_dim), nn.ReLU())
+            self.state_proj = nn.Sequential(nn.LayerNorm(state_dim), nn.Linear(state_dim, fusion_dim), nn.ReLU())
+            self.ref_proj = nn.Sequential(nn.LayerNorm(ref_action_dim), nn.Linear(ref_action_dim, fusion_dim), nn.ReLU())
+            self.action_proj = nn.Sequential(nn.LayerNorm(action_dim), nn.Linear(action_dim, fusion_dim), nn.ReLU())
+            input_dim = fusion_dim * 4
+        else:
+            input_dim = z_dim + state_dim + ref_action_dim + action_dim
 
         def make_q() -> nn.Sequential:
             return nn.Sequential(
@@ -160,7 +207,7 @@ class TwinQCritic(nn.Module):
         ref_action: torch.Tensor,
         action: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        x = torch.cat([z_rl, state, ref_action, action], dim=-1)
+        x = self._fuse(z_rl, state, ref_action, action)
         return self.q1(x), self.q2(x)
 
     def q1_value(
@@ -170,8 +217,27 @@ class TwinQCritic(nn.Module):
         ref_action: torch.Tensor,
         action: torch.Tensor,
     ) -> torch.Tensor:
-        x = torch.cat([z_rl, state, ref_action, action], dim=-1)
+        x = self._fuse(z_rl, state, ref_action, action)
         return self.q1(x)
+
+    def _fuse(
+        self,
+        z_rl: torch.Tensor,
+        state: torch.Tensor,
+        ref_action: torch.Tensor,
+        action: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.fusion_mode == "projected":
+            return torch.cat(
+                [
+                    self.z_proj(z_rl),
+                    self.state_proj(state),
+                    self.ref_proj(ref_action),
+                    self.action_proj(action),
+                ],
+                dim=-1,
+            )
+        return torch.cat([z_rl, state, ref_action, action], dim=-1)
 
 
 @dataclass(slots=True)
@@ -183,6 +249,8 @@ class HILSERLConfig:
     action_chunk_steps: int = 10
     actor_hidden_dim: int = 256
     critic_hidden_dim: int = 256
+    fusion_mode: str = "direct"
+    fusion_dim: int = 128
     action_delta_scale_xyz: float = 0.015
     actor_lr: float = 3e-4
     critic_lr: float = 3e-4
@@ -213,12 +281,44 @@ class HILSERLTrainer:
         self.action_chunk_steps = max(1, int(cfg.action_chunk_steps))
         self.flat_action_dim = self.action_chunk_steps * self.train_action_dim
         action_scale = np.full((self.flat_action_dim,), cfg.action_delta_scale_xyz, dtype=np.float32)
-        actor_in = cfg.z_dim + cfg.state_dim + self.flat_action_dim
-        critic_in = cfg.z_dim + cfg.state_dim + self.flat_action_dim + self.flat_action_dim
-        self.actor = RLTActor(actor_in, self.flat_action_dim, cfg.actor_hidden_dim, action_scale).to(self.device)
-        self.actor_target = RLTActor(actor_in, self.flat_action_dim, cfg.actor_hidden_dim, action_scale).to(self.device)
-        self.critic = TwinQCritic(critic_in, cfg.critic_hidden_dim).to(self.device)
-        self.critic_target = TwinQCritic(critic_in, cfg.critic_hidden_dim).to(self.device)
+        self.actor = RLTActor(
+            cfg.z_dim,
+            cfg.state_dim,
+            self.flat_action_dim,
+            self.flat_action_dim,
+            cfg.actor_hidden_dim,
+            action_scale,
+            fusion_mode=cfg.fusion_mode,
+            fusion_dim=cfg.fusion_dim,
+        ).to(self.device)
+        self.actor_target = RLTActor(
+            cfg.z_dim,
+            cfg.state_dim,
+            self.flat_action_dim,
+            self.flat_action_dim,
+            cfg.actor_hidden_dim,
+            action_scale,
+            fusion_mode=cfg.fusion_mode,
+            fusion_dim=cfg.fusion_dim,
+        ).to(self.device)
+        self.critic = TwinQCritic(
+            cfg.z_dim,
+            cfg.state_dim,
+            self.flat_action_dim,
+            self.flat_action_dim,
+            cfg.critic_hidden_dim,
+            fusion_mode=cfg.fusion_mode,
+            fusion_dim=cfg.fusion_dim,
+        ).to(self.device)
+        self.critic_target = TwinQCritic(
+            cfg.z_dim,
+            cfg.state_dim,
+            self.flat_action_dim,
+            self.flat_action_dim,
+            cfg.critic_hidden_dim,
+            fusion_mode=cfg.fusion_mode,
+            fusion_dim=cfg.fusion_dim,
+        ).to(self.device)
         self.actor_target.load_state_dict(self.actor.state_dict())
         self.critic_target.load_state_dict(self.critic.state_dict())
         self.actor_opt = torch.optim.AdamW(self.actor.parameters(), lr=cfg.actor_lr)
@@ -384,6 +484,14 @@ class HILSERLTrainer:
 
     def load(self, path: Path) -> None:
         ckpt = torch.load(path, map_location=self.device)
+        ckpt_config = ckpt.get("config", {})
+        ckpt_fusion_mode = str(ckpt_config.get("fusion_mode", "direct"))
+        if ckpt_fusion_mode != str(self.cfg.fusion_mode):
+            raise ValueError(
+                f"Stage2 checkpoint fusion_mode={ckpt_fusion_mode!r} does not match "
+                f"current fusion_mode={self.cfg.fusion_mode!r}. Use the same "
+                "mode as the checkpoint, or start a fresh Stage2 actor/critic."
+            )
         self.actor.load_state_dict(ckpt["actor"])
         self.actor_target.load_state_dict(ckpt.get("actor_target", ckpt["actor"]))
         self.critic.load_state_dict(ckpt["critic"])
