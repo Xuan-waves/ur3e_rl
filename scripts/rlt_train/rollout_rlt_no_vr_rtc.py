@@ -35,6 +35,7 @@ class RLTNoVRRTCRollout(RLTNoVRRollout):
     def __init__(self, node, args: argparse.Namespace) -> None:
         self.latest_packet_lock = threading.Lock()
         self.latest_packet = None
+        self.latest_packet_generation: int | None = None
         self.worker_stop = threading.Event()
         self.worker_thread: threading.Thread | None = None
         self.rtc_last_packet_stamp: float | None = None
@@ -77,6 +78,14 @@ class RLTNoVRRTCRollout(RLTNoVRRollout):
             return
         with self.latest_packet_lock:
             self.latest_packet = packet
+            self.latest_packet_generation = self.rollout_generation
+
+    def _drain_actions(self) -> None:
+        super()._drain_actions()
+        with self.latest_packet_lock:
+            self.latest_packet = None
+            self.latest_packet_generation = None
+        self.rtc_last_packet_stamp = None
 
     def _rtc_worker_loop(self) -> None:
         while not self.worker_stop.is_set():
@@ -93,7 +102,8 @@ class RLTNoVRRTCRollout(RLTNoVRRollout):
                 continue
             with self.latest_packet_lock:
                 packet = self.latest_packet
-            if packet is None:
+                generation = self.latest_packet_generation
+            if packet is None or generation is None or generation != self.rollout_generation:
                 time.sleep(self.rtc_idle_sleep_s)
                 continue
             if self.infer_busy:
@@ -105,8 +115,9 @@ class RLTNoVRRTCRollout(RLTNoVRRollout):
             self.args.execution_horizon = self.rtc_infer_count
             self.args.replace_queue_on_infer = self.rtc_replace_queue_on_infer
             try:
-                self._run_inference(packet)
-                self.rtc_last_packet_stamp = float(packet.stamp)
+                self._run_inference(packet, generation)
+                if generation == self.rollout_generation:
+                    self.rtc_last_packet_stamp = float(packet.stamp)
             finally:
                 self.args.execution_horizon = old_horizon
                 self.args.replace_queue_on_infer = old_replace

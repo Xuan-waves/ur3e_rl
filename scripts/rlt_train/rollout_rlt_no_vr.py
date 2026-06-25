@@ -126,6 +126,7 @@ class RLTNoVRRollout:
         self.action_queue: deque[RLTActionPacket] = deque()
         self.action_lock = threading.Lock()
         self.current_action: RLTActionPacket | None = None
+        self.rollout_generation = 0
         self.last_action_step_time = 0.0
         self.last_published_pos: np.ndarray | None = None
         self.last_published_gripper: float | None = None
@@ -285,9 +286,11 @@ class RLTNoVRRollout:
         if packet is None:
             return
         self.infer_busy = True
-        threading.Thread(target=self._run_inference, args=(packet,), daemon=True).start()
+        generation = self.rollout_generation
+        threading.Thread(target=self._run_inference, args=(packet, generation), daemon=True).start()
 
-    def _run_inference(self, packet: ObservationPacket) -> None:
+    def _run_inference(self, packet: ObservationPacket, generation: int | None = None) -> None:
+        generation = self.rollout_generation if generation is None else int(generation)
         try:
             actions = self.runner.infer_sequence(packet, max(1, int(self.args.execution_horizon)))
             z_rl = self.token_encoder.encode(packet, actions)
@@ -310,10 +313,16 @@ class RLTNoVRRollout:
             self.node.get_logger().error(f"RLT rollout inference failed: {exc}")
             self.infer_busy = False
             return
-        if not self.inference_enabled:
+        if not self.inference_enabled or generation != self.rollout_generation:
             self.infer_busy = False
+            self._log_info(
+                f"discard inference from old rollout generation={generation}, current={self.rollout_generation}"
+            )
             return
         with self.action_lock:
+            if generation != self.rollout_generation:
+                self.infer_busy = False
+                return
             if self.args.replace_queue_on_infer:
                 self.action_queue.clear()
             self.action_queue.extend(packets)
@@ -571,9 +580,16 @@ class RLTNoVRRollout:
         self.node.get_logger().info(f"Rollout started by {reason}.")
 
     def _drain_actions(self) -> None:
+        self.rollout_generation += 1
         with self.action_lock:
             self.action_queue.clear()
             self.current_action = None
+        self.observation_history.clear()
+        while True:
+            try:
+                self.pending_reference_stamps.get_nowait()
+            except queue.Empty:
+                break
 
     def _preview_loop(self) -> None:
         try:

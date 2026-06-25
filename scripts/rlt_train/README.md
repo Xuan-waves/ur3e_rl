@@ -118,36 +118,222 @@ This baseline answers: "Does the frozen VLA already succeed under the current ro
 
 Use this when you want to evaluate a trained Stage2 RLT actor without VR and without online learning.
 
+The rollout loads four frozen components:
+
+```text
+SmolVLA policy        produces the reference action chunk
+Stage1 encoder       produces z_rl from VLA internal embeddings
+RL gate              enables RLT only during the critical insertion phase
+Stage2 actor          refines the VLA xyz action chunk
+
+Ready gate            is optional control logic for starting the next trial
+```
+
+No actor/critic update is performed during rollout. The Stage2 critic is loaded
+from the checkpoint for compatibility, but it does not choose commands. Only the
+trained actor affects robot motion.
+
+### Required Processes
+
+Before starting either the sync or RTC RLT rollout, run these mandatory
+processes in separate terminals and keep them running:
+
+```bash
+# Terminal 1: RealSense cameras
+scripts/collect_data/run_realsense_cameras.sh
+
+# Terminal 2: UR3e impedance robot controller
+python scripts/hardware/ur3e_vr_servoj_ros2.py \
+  --node robot \
+  --robot-ip 192.168.5.1 \
+  --control-mode impedance \
+  --impedance-profile teleop \
+  --no-twin
+```
+
+Only after both processes are ready should you start
+`rollout_rlt_no_vr.py` or `rollout_rlt_no_vr_rtc.py` in a third terminal.
+
+Do not start another rollout, collector, or VR control process that also
+publishes `/ur3e_vr/ik_target` or `/ur3e_vr/vr_command`.
+
+### Sync Rollout
+
+The sync rollout obtains one aligned observation, runs VLA inference, builds
+`z_rl`, applies the Stage2 actor when the RL gate is active, and then executes
+the selected portion of the resulting chunk.
+
 Sync version:
 
 ```bash
 python scripts/rlt_train/rollout_rlt_no_vr.py \
+  --policy-path outputs/rlt_vla/ur3e_smolvla_0614/checkpoints/030000/pretrained_model \
+  --stage1-checkpoint outputs/rlt_stage1/rlt_stage1_ur3e_smolvla_0614_030000_20260616_163323/best.pt \
+  --gate-checkpoint outputs/rlt_gate/rlt_gate_20260615_142442/best.pt \
+  --rlt-checkpoint outputs/rlt_stage2/hil_serl_stage2_20260616_204313/checkpoints/stage2_ep000050.pt \
+  --ready-gate-checkpoint outputs/ready_gate/ready_gate_20260617_150953/best.pt \
   --wait-ready-on-start \
   --execute
 ```
+
+Without `--execute`, the script is a dry run: models and topics are exercised,
+but robot commands are not published.
+
+### RTC Rollout
+
+The RTC-style rollout keeps ROS observation/publish callbacks responsive while a
+background worker performs VLA inference. It refreshes the action queue when the
+queue becomes short. This usually gives smoother continuous motion, but actions
+may be based on a slightly older observation than strict sync rollout.
 
 RTC-style version:
 
 ```bash
 python scripts/rlt_train/rollout_rlt_no_vr_rtc.py \
-  --execute \
+  --policy-path outputs/rlt_vla/ur3e_smolvla_0614/checkpoints/030000/pretrained_model \
+  --stage1-checkpoint outputs/rlt_stage1/rlt_stage1_ur3e_smolvla_0614_030000_20260616_163323/best.pt \
+  --gate-checkpoint outputs/rlt_gate/rlt_gate_20260615_142442/best.pt \
+  --rlt-checkpoint outputs/rlt_stage2/hil_serl_stage2_20260616_204313/checkpoints/stage2_ep000050.pt \
+  --ready-gate-checkpoint outputs/ready_gate/ready_gate_20260617_150953/best.pt \
   --wait-ready-on-start \
   --rtc-infer-count 10 \
-  --rtc-queue-refill-threshold 3
+  --rtc-queue-refill-threshold 3 \
+  --execute
 ```
 
-What happens:
+### Per-Trial Execution Flow
 
 ```text
-1. Program starts with return_home and open gripper.
-2. If --wait-ready-on-start is set, it waits for ready_gate=1.
-3. Frozen VLA produces action chunks.
-4. While RL_gate=0, VLA actions are executed unchanged.
-5. While RL_gate=1, Stage2 actor adds an xyz residual to the VLA chunk.
-6. When RL_gate exits, the robot returns home, resets impedance, then waits for ready_gate.
+1. Before model loading, send return_home and open the gripper.
+2. Wait for fresh front image, wrist image, and robot state.
+3. If --wait-ready-on-start is enabled, wait for ready_gate=1.
+4. Start a trial and reset impedance state.
+5. SmolVLA predicts ref_action_chunk from the aligned observation.
+6. Stage1 reads VLA hidden features and produces z_rl.
+7. RL gate evaluates the camera image.
+8. If RL_gate=0:
+     executed_chunk = ref_action_chunk
+9. If RL_gate=1:
+     executed_xyz = Stage2Actor(z_rl, state, ref_action_chunk)
+     executed_gripper = VLA gripper
+10. Publish fixed-orientation xyz targets to the impedance robot node.
+11. Once RL gate exits, lock re-entry for this trial, clear queued actions,
+    invalidate any in-flight inference and cached RTC observation, return home,
+    reset impedance, and wait for ready_gate before the next trial.
 ```
 
-The no-VR RLT rollout is the cleanest test of the learned actor. If this behaves worse than plain VLA, inspect the Stage2 checkpoint or gate timing first.
+The Stage2 actor checkpoint stores its own architecture configuration, including
+action chunk length, residual scale, and `direct` or `projected` fusion mode.
+Rollout reconstructs the network from that checkpoint. Do not manually force a
+different fusion mode during rollout.
+
+### Sync Versus RTC
+
+```text
+sync:
+  observation -> inference -> action execution -> next observation
+  easier to reason about and best for model diagnosis
+
+RTC:
+  observation callbacks continue while a background worker performs inference
+  action queue is refreshed before it becomes empty
+  usually smoother, but introduces observation/action latency
+```
+
+Recommended order:
+
+```text
+1. Test plain VLA sync.
+2. Test RLT sync and compare behavior inside RL_gate=1.
+3. Use RLT RTC only after sync behavior is correct.
+```
+
+### Important Rollout Parameters
+
+```text
+--policy-path
+  Frozen SmolVLA pretrained_model directory.
+
+--stage1-checkpoint
+  Frozen RL-token encoder checkpoint used to compute z_rl.
+
+--rlt-checkpoint
+  Trained Stage2 actor/critic checkpoint. The actor controls refinement.
+
+--gate-checkpoint
+  RL gate classifier. RLT can affect actions only while this gate is active.
+
+--ready-gate-checkpoint
+  Scene-ready classifier used to start the next trial.
+
+--execution-horizon
+  Number of actions taken from each VLA inference result in sync mode.
+
+--action-step-hz
+  Rate at which queued action steps are consumed.
+
+--command-hz
+  Rate at which the current target is published to the robot node.
+
+--sync-reference front|wrist|timer|both
+  Observation alignment trigger. Keep it consistent with collection unless
+  intentionally testing another alignment policy.
+
+--wait-ready-on-start
+  Do not begin the first trial until ready_gate is positive.
+
+--auto-start-on-ready / --no-auto-start-on-ready
+  Automatically start a new trial after ready_gate becomes positive.
+
+--min-action-z
+  Final safety floor for published target z.
+
+--action-pose-filter-alpha
+  Output position smoothing. Larger values follow new targets more strongly.
+
+--max-action-pos-step
+  Maximum accepted position change between published targets.
+
+--reset-impedance-on-trial-start
+  Reset the impedance reference before a new trial.
+
+--reset-impedance-during-home
+  Reset impedance while returning home after the gate exits.
+
+--preview / --no-preview
+  Enable or disable the OpenCV camera/gate preview.
+```
+
+RTC-specific parameters:
+
+```text
+--rtc-infer-count
+  Actions requested per background inference refresh. It is clamped to at least
+  the Stage2 actor chunk length.
+
+--rtc-queue-refill-threshold
+  Start another inference when queued actions fall to this count.
+
+--rtc-replace-queue-on-infer
+  Replace old pending actions with the newest inference result.
+```
+
+### Reading Rollout Behavior
+
+```text
+RL_gate=0:
+  Robot should match the plain frozen VLA baseline.
+
+RL_gate=1:
+  Stage2 actor may alter xyz, but gripper remains from the VLA.
+
+After gate exit:
+  RLT must not re-enter during the same trial. The robot returns home and waits.
+```
+
+If the robot behaves differently before `RL_gate=1`, first check that no second
+command publisher is running and compare against the plain VLA ready-loop. The
+no-VR RLT rollout is the cleanest test of the learned actor.
 
 ## Stage1: Train And Check RL Token
 
