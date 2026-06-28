@@ -2,6 +2,9 @@
 
 This repository contains the UR3e real-robot teleoperation, data collection, SmolVLA training/rollout, and RLT-style refinement tools used for Ethernet-plug insertion experiments.
 
+You can view the demo through https://www.bilibili.com/video/BV1uVLX6uE3E/?share_source=copy_web&vd_source=618da6302edcf392875bd920f902238b
+or <iframe src="//player.bilibili.com/player.html?isOutside=true&aid=116764692253431&bvid=BV1uVLX6uE3E&cid=39186664598&p=1" scrolling="no" border="0" frameborder="no" framespacing="0" allowfullscreen="true"></iframe>
+
 The project is built around:
 
 - UR3e end-effector teleoperation with XRoboToolkit VR input.
