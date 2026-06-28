@@ -6,7 +6,7 @@ You can view the demo through
 ## Demo
 [![Bilibili Demo](https://img.shields.io/badge/Bilibili-Watch%20Demo-00A1D6?logo=bilibili&logoColor=white)](https://www.bilibili.com/video/BV1uVLX6uE3E/)
 
-or：
+
 [![Xiaohongshu Demo](https://img.shields.io/badge/Xiaohongshu-Watch%20Demo-FF2442)](https://www.xiaohongshu.com/discovery/item/6a3264fb0000000016026af9)
 
 The project is built around:
