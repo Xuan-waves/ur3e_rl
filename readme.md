@@ -7,7 +7,8 @@ You can view the demo through
 [![Bilibili Demo](https://img.shields.io/badge/Bilibili-Watch%20Demo-00A1D6?logo=bilibili&logoColor=white)](https://www.bilibili.com/video/BV1uVLX6uE3E/)
 
 
-[![Xiaohongshu Demo](https://img.shields.io/badge/Xiaohongshu-Watch%20Demo-FF2442)](https://www.xiaohongshu.com/discovery/item/6a3264fb0000000016026af9)
+or 小红书：
+https://www.xiaohongshu.com/explore/6a3264fb0000000016026af9?xsec_token=ABlF0bPI8QfGO9RDdHlkzPIfpA1JW6R0chscDVKbozabk=&xsec_source=pc_user
 
 The project is built around:
 
